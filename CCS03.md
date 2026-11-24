@@ -41,6 +41,7 @@ Credit goes to their authors (names as in their commits).
 |---|---|---|
 | CCS03 PR 1 | `v_ldexp_f32`, `v_frexp_mant_f32` and `v_frexp_exp_i32_f32` | 9hvn9yt2vk-netizen |
 | CCS03 PR 2 | Raw buffer views that do not start on 16 bytes become null views instead of removing the device (also upstream PR 123) | 9hvn9yt2vk-netizen |
+| CCS03 PR 3 | `cargo xtask` finds the repository at run time, so the commit hook keeps working when the repository moves to another drive | Apenshot123 |
 
 ## Changes of CCS03's own
 
