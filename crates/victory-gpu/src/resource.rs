@@ -2181,7 +2181,7 @@ mod tests {
         );
 
         type ClearRtv = extern "system" fn(This, u64, *const [f32; 4], u32, *const [i32; 4]);
-        let clear = [0.25f32, 0.5, 0.75, 1.0];
+        let clear = [64.0f32 / 255.0, 128.0 / 255.0, 191.0 / 255.0, 1.0];
         slot::<ClearRtv>(list, 0x1a0)(list, rtv_handle, &clear, 0, null.cast());
         assert_eq!(
             slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list),
