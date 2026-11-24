@@ -21,6 +21,20 @@ pub static D3D12SDKVersion: u32 = 614;
 #[unsafe(no_mangle)]
 pub static mut D3D12SDKPath: *const i8 = c".\\D3D12\\".as_ptr();
 
+#[cfg(test)]
+mod agility_tests {
+    use std::ffi::CStr;
+
+    #[test]
+    fn agility_sdk_version_and_path_match_the_runtime_package() {
+        assert_eq!(super::D3D12SDKVersion, 614);
+
+        // SAFETY: the exported pointer refers to a static NUL-terminated string.
+        let path = unsafe { CStr::from_ptr(super::D3D12SDKPath) };
+        assert_eq!(path.to_bytes(), b".\\D3D12\\");
+    }
+}
+
 mod census;
 mod inspect;
 mod run;

@@ -43,9 +43,12 @@ model 6.6). The D3D12 runtime built into Windows 10 refuses them, so no
 pipeline can be made and the screen stays black. Windows 11 is not affected.
 
 The fix is the DirectX 12 Agility SDK: `victory.exe` exports
-`D3D12SDKVersion`, and Windows then loads a newer `D3D12Core.dll` from a
-`D3D12` folder beside it. Upstream PR 968 does this. It is being tested for
-CCS03 and is not in `ccs03` yet. Microsoft's DLLs are never committed here.
+`D3D12SDKVersion` and `D3D12SDKPath`, and Windows then loads a newer
+`D3D12Core.dll` from a `D3D12` folder beside it. To use it, download the
+`Microsoft.Direct3D.D3D12` NuGet package in version 1.614.x and copy
+`build/native/bin/x64/D3D12Core.dll` into the matching build folder, for
+example `target/release/D3D12/D3D12Core.dll`. Without that DLL the system
+runtime is used. Microsoft's DLLs are never committed here.
 
 ## Getting started
 

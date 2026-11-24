@@ -34,6 +34,7 @@ Credit goes to their authors (names as in their commits).
 | 452 | Loops that only wait for memory stop after 4096 iterations; the loop limit works in release builds | AntoninMichelq |
 | 284 | RDNA2's legacy multiply-adds are the fused ones | Dufftwt |
 | 298 | Lane masks spilled to VGPR lanes and read back | permadiego |
+| 968 | Windows 10 loads the DirectX 12 Agility SDK through executable exports | bailu12300 |
 
 ## From CCS03 contributors
 
@@ -53,6 +54,10 @@ Small changes needed to make the pull requests above build together:
   that PR 568 added to `HostHeap::make_at`.
 - The valu_tests compute builder is split in two, so PR 606's tests (whole
   programs) and PR 628's (a body wrapped by the builder) both fit.
+- PR 968's packed-format mappings for formats 86 and 115 are not included:
+  `pc_format` also handles sampled textures, whose staging copy still uses
+  the console's two-byte texels. A safe substitution needs format-support
+  checks and matching staging behavior.
 
 - `README.md` is CCS03's own and links to upstream's README for the
   technical details. When merging upstream `main`, keep ours
@@ -73,7 +78,6 @@ And one correction to a pull request:
 | 584 | Reported to keep the title from reaching its menu (black screen) |
 | 708 | Breaks two `victory-core` tests on current `main` |
 | 626 | Only needed on Windows 10 or older D3D12 runtimes |
-| 968 | Windows 10 through the Agility SDK: being tested on Windows 10 with an RTX 2060 SUPER |
 | 346 | Reviewers report bugs whose fixes are not in the PR yet |
 | 233, 320, 439 | Running wave64 programs on 32-lane hosts: in-game reports still show driver compiler faults and a black world on NVIDIA |
 | 599 | Large conflicts in the shader lowering; helps hosts with 64-lane waves only |
