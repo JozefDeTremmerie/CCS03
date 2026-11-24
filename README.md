@@ -2,7 +2,8 @@
 
 > This is CCS03, a fork of [VIctory](https://github.com/Marvisak/VIctory)
 > with reviewed and tested upstream pull requests added on top. See
-> [CCS03.md](CCS03.md) for what is in it and why. Everything below is
+> [CCS03.md](CCS03.md) for what is in it and why, and
+> [CONTRIBUTING.md](CONTRIBUTING.md) to work on it. Everything below is
 > upstream's README.
 
 Runs Grand Theft Auto VI (Xbox Series X|S) natively on Windows, from files
