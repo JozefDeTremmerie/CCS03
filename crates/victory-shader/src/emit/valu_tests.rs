@@ -722,6 +722,52 @@ fn v_sin_and_v_cos_f32_reduce_large_turns() {
 }
 
 #[test]
+fn v_cvt_f32_f64_rounds_to_nearest_even() {
+    // v_cvt_f32_f64 v0, v[1:2] (VOP1 0x00f): the f64 of root constants 0 and 1.
+    let shader = build_valu_cs(&[vop1(0x00F, 0, vgpr(1))]);
+    let values: &[u64] = &[
+        0,
+        1,
+        1.0f64.to_bits(),
+        (-2.5f64).to_bits(),
+        0.1f64.to_bits(),
+        (1.0f64 / 3.0).to_bits(),
+        f64::from(f32::MAX).to_bits(),
+        f64::MAX.to_bits(),
+        f64::INFINITY.to_bits(),
+        f64::NEG_INFINITY.to_bits(),
+        f64::from(f32::MIN_POSITIVE).to_bits(),
+        f64::from(f32::from_bits(1)).to_bits(),
+        // Halfway between two f32s: to the even one, both ways.
+        0x3FF0_0000_1000_0000,
+        0x3FF0_0000_3000_0000,
+        // Just past halfway, and half of the smallest denormal.
+        0x3FF0_0000_1000_0001,
+        0x36A0_0000_0000_0000,
+        0x7FF8_0000_0000_0000,
+    ];
+    let inputs: Vec<[u32; 4]> = values
+        .iter()
+        .map(|&x| [x as u32, (x >> 32) as u32, 0, 0])
+        .collect();
+    run_cases(&shader, &inputs, |backend, i, _, got| {
+        let x = values[i];
+        let want = super::lower::f32_bits_of_f64(x);
+        if f64::from_bits(x).is_nan() {
+            assert!(
+                f32::from_bits(got).is_nan(),
+                "{backend}: {x:#018x} -> {got:#010x}"
+            );
+        } else {
+            assert_eq!(
+                got, want,
+                "{backend}: v_cvt_f32_f64({x:#018x}) = {got:#010x}, want {want:#010x}"
+            );
+        }
+    });
+}
+
+#[test]
 fn v_cvt_u16_and_i16_f16_saturate() {
     // v_mov_b32 v0, 0; v_cvt_u16_f16 / v_cvt_i16_f16 v0, v1 (VOP1 0x052 / 0x053).
     let cases: &[(u16, u16, u16)] = &[
