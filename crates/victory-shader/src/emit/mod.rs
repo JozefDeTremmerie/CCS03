@@ -967,6 +967,21 @@ mod tests {
         stores_v1(&[0x7E04_028B, 0xDACC_0000, 0x0100_0200]).unwrap();
     }
 
+    /// `v_cvt_f32_f64` translates (two compute programs of the world stopped
+    /// on it): from a register pair, with `abs` and `neg`, and from an
+    /// inline constant.
+    #[test]
+    fn a_double_converts_to_a_float() {
+        // v_mov_b32 v2, 11; v_mov_b32 v3, v0
+        let pair = [0x7E04_028B, 0x7E06_0300];
+        // v_cvt_f32_f64 v1, v[2:3]
+        stores_v1(&[pair[0], pair[1], 0x7E02_1F02]).unwrap();
+        // v_cvt_f32_f64 v1, -|v[2:3]| (VOP3)
+        stores_v1(&[pair[0], pair[1], 0xD58F_0101, 0x2000_0102]).unwrap();
+        // v_cvt_f32_f64 v1, 1.0 (VOP3)
+        stores_v1(&[0xD58F_0001, 0x0000_00F2]).unwrap();
+    }
+
     /// A carry-in reading a join of compares after a divergent branch. A
     /// lane that skipped the inner compare has VCC clear there (VOPC clears
     /// inactive lanes), not the first compare's bit, so the join is no

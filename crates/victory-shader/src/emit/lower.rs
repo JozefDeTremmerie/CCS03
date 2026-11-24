@@ -6998,6 +6998,14 @@ impl<'a> Lower<'a> {
                 let r = self.s.m.cast(c, op, a, self.s.t.f32);
                 float(self, r)
             }
+            "v_cvt_f32_f64" => {
+                // Worked out on the f64's bits in 64-bit integers, so that
+                // the host needs no double-precision support.
+                let x = self.f64_src(inst, 0)?;
+                let r = self.f32_bits_of_f64(x);
+                let r = self.as_float(r);
+                float(self, r)
+            }
             "v_fma_mix_f32" | "v_fma_mixlo_f16" | "v_fma_mixhi_f16" => {
                 // Each source is f32, or with op_sel_hi the low (op_sel: high)
                 // f16 half; neg_hi is the absolute value here.
@@ -7356,6 +7364,123 @@ impl<'a> Lower<'a> {
                 Ok(self.s.m.cast(c, Cast::ZExt, x, i64t))
             }
         }
+    }
+
+    /// A 64-bit float source as its bits in an i64: a register pair, an
+    /// inline constant (the float ones as f64 values, the integer ones
+    /// sign-extended) or a literal (its high dword; the low one is 0), with
+    /// `abs` and `neg` applied to the sign bit.
+    fn f64_src(&mut self, inst: &Inst, k: usize) -> Result<V, Why> {
+        let Fields::Valu(v) = &inst.fields else {
+            unreachable!()
+        };
+        if v.sdwa.is_some() || v.dpp.is_some() {
+            return Err("64-bit operand modifiers");
+        }
+        let c = self.cur;
+        let i64t = self.s.m.int(64);
+        self.s.flags |= flags::INT64;
+        let op = *v.src.get(k).ok_or("a missing operand")?;
+        let mut x = match op {
+            Operand::Const(code @ 240..=248) => {
+                let bits = f64_inline(code).ok_or("a special operand")?;
+                self.s.m.int_const(i64t, bits as i64)
+            }
+            Operand::Literal(hi) => self.s.m.int_const(i64t, (u64::from(hi) << 32) as i64),
+            Operand::Vector { reg, .. } => {
+                let lo = self.i32_of(inst.read(Reg::V(reg)).ok_or("an unread operand")?)?;
+                let hi = self.i32_of(inst.read(Reg::V(reg + 1)).ok_or("an unread operand")?)?;
+                self.join64(lo, hi)
+            }
+            Operand::Scalar { code, .. } if code != NULL => {
+                let lo = self.i32_of(inst.read(Reg::S(code)).ok_or("an unread operand")?)?;
+                let hi = self.i32_of(inst.read(Reg::S(code + 1)).ok_or("an unread operand")?)?;
+                self.join64(lo, hi)
+            }
+            Operand::Const(code @ 128..=208) => {
+                let n = crate::resource::inline(code).ok_or("a special operand")?;
+                self.s.m.int_const(i64t, i64::from(n as i32))
+            }
+            _ => return Err("a 64-bit float operand"),
+        };
+        let sign = self.s.m.int_const(i64t, i64::MIN);
+        if v.abs >> k & 1 != 0 {
+            let keep = self.s.m.int_const(i64t, i64::MAX);
+            x = self.s.m.bin(c, Bin::And, x, keep);
+        }
+        if v.neg >> k & 1 != 0 {
+            x = self.s.m.bin(c, Bin::Xor, x, sign);
+        }
+        Ok(x)
+    }
+
+    /// The bits of the f32 nearest an f64 (`x`, its bits in an i64), ties
+    /// to even, as `v_cvt_f32_f64` rounds: what the free `f32_bits_of_f64`
+    /// (a test's reference) does on the CPU, step for step. Denormal
+    /// results are kept; f64 denormals come out as zeros of their sign; a
+    /// NaN stays a NaN (quiet, its sign and its payload's high bits kept);
+    /// past the largest f32 is infinity.
+    fn f32_bits_of_f64(&mut self, x: V) -> V {
+        let c = self.cur;
+        let m = &mut self.s.m;
+        let i64t = m.int(64);
+        let k = |m: &mut super::bitcode::Module, v: i64| m.int_const(i64t, v);
+        let (k0, k1, k23, k29, k34, k52, k63) =
+            (k(m, 0), k(m, 1), k(m, 23), k(m, 29), k(m, 34), k(m, 52), k(m, 63));
+        let sign = m.bin(c, Bin::LShr, x, k63);
+        let field = m.bin(c, Bin::LShr, x, k52);
+        let k7ff = k(m, 0x7ff);
+        let exp = m.bin(c, Bin::And, field, k7ff);
+        let low52 = k(m, (1 << 52) - 1);
+        let mant = m.bin(c, Bin::And, x, low52);
+        let one52 = k(m, 1 << 52);
+        let sig = m.bin(c, Bin::Or, mant, one52);
+        // The f32 exponent the value would have, unbiased by 1023, biased by 127.
+        let k896 = k(m, 896);
+        let e = m.bin(c, Bin::Sub, exp, k896);
+        // Below the normal range the significand shifts out further (a
+        // denormal result); by 63 at most, which leaves nothing of it.
+        let under = m.bin(c, Bin::Sub, k1, e);
+        let pos = m.cmp(c, pred::SGT, under, k0);
+        let under = m.select(c, pos, under, k0);
+        let far = m.cmp(c, pred::SGT, under, k34);
+        let under = m.select(c, far, k34, under);
+        let shift = m.bin(c, Bin::Add, k29, under);
+        let q = m.bin(c, Bin::LShr, sig, shift);
+        let unit = m.bin(c, Bin::Shl, k1, shift);
+        let below = m.bin(c, Bin::Sub, unit, k1);
+        let rest = m.bin(c, Bin::And, sig, below);
+        let less = m.bin(c, Bin::Sub, shift, k1);
+        let half = m.bin(c, Bin::Shl, k1, less);
+        // Up past half, or at half when the kept bits are odd.
+        let odd = m.bin(c, Bin::And, q, k1);
+        let rest = m.bin(c, Bin::Add, rest, odd);
+        let up = m.cmp(c, pred::IUGT, rest, half);
+        let up = m.cast(c, Cast::ZExt, up, i64t);
+        // The exponent field less the significand's leading bit, which q
+        // carries for a normal result; a carry out of rounding moves it up.
+        let normal = m.cmp(c, pred::SGT, e, k1);
+        let lower = m.bin(c, Bin::Sub, e, k1);
+        let field = m.select(c, normal, lower, k0);
+        let field = m.bin(c, Bin::Shl, field, k23);
+        let bits = m.bin(c, Bin::Add, field, q);
+        let bits = m.bin(c, Bin::Add, bits, up);
+        let k255 = k(m, 255);
+        let huge = m.cmp(c, pred::SGE, e, k255);
+        let inf = k(m, 0x7f80_0000);
+        let bits = m.select(c, huge, inf, bits);
+        let all = m.cmp(c, pred::EQ, exp, k7ff);
+        let payload = m.cmp(c, pred::NE, mant, k0);
+        let nan = m.bin(c, Bin::And, all, payload);
+        let top = m.bin(c, Bin::LShr, mant, k29);
+        let quiet = k(m, 0x7fc0_0000);
+        let nan_bits = m.bin(c, Bin::Or, top, quiet);
+        let bits = m.select(c, nan, nan_bits, bits);
+        let k31 = k(m, 31);
+        let sign = m.bin(c, Bin::Shl, sign, k31);
+        let bits = m.bin(c, Bin::Or, bits, sign);
+        let i32t = self.s.t.i32;
+        self.s.m.cast(c, Cast::Trunc, bits, i32t)
     }
 
     fn join64(&mut self, lo: V, hi: V) -> V {
@@ -10750,6 +10875,51 @@ fn interp_mode(kind: Barycentric) -> Option<u8> {
     })
 }
 
+/// The f64 bits of a float inline constant (codes 240-248), as a 64-bit
+/// float operand reads it.
+fn f64_inline(code: u8) -> Option<u64> {
+    Some(match code {
+        240 => 0.5f64.to_bits(),
+        241 => (-0.5f64).to_bits(),
+        242 => 1.0f64.to_bits(),
+        243 => (-1.0f64).to_bits(),
+        244 => 2.0f64.to_bits(),
+        245 => (-2.0f64).to_bits(),
+        246 => 4.0f64.to_bits(),
+        247 => (-4.0f64).to_bits(),
+        // 1 / (2 pi)
+        248 => 0x3FC4_5F30_6DC9_C882,
+        _ => return None,
+    })
+}
+
+/// What `Lower::f32_bits_of_f64` emits, on the CPU and in the same steps:
+/// the f32 nearest an f64, ties to even, NaNs quiet with their sign and
+/// the high bits of their payload.
+#[cfg(test)]
+pub(super) fn f32_bits_of_f64(x: u64) -> u32 {
+    let sign = x >> 63;
+    let exp = (x >> 52 & 0x7ff) as i64;
+    let mant = x & ((1 << 52) - 1);
+    let sig = mant | 1 << 52;
+    let e = exp - 896;
+    let under = (1 - e).clamp(0, 34);
+    let shift = 29 + under as u32;
+    let q = sig >> shift;
+    let rest = sig & ((1 << shift) - 1);
+    let half = 1u64 << (shift - 1);
+    let up = u64::from(rest + (q & 1) > half);
+    let field = if e > 1 { (e - 1) as u64 } else { 0 };
+    let mut bits = (field << 23) + q + up;
+    if e >= 255 {
+        bits = 0x7f80_0000;
+    }
+    if exp == 0x7ff && mant != 0 {
+        bits = mant >> 29 | 0x7fc0_0000;
+    }
+    (bits | sign << 31) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Lowered, Numeric, Parts, buffer_format, half_shift, lower};
@@ -10759,6 +10929,75 @@ mod tests {
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    /// The CPU form of `v_cvt_f32_f64`'s lowering agrees with Rust's own
+    /// f64 to f32 conversion (ties to even) on edge values and on a few
+    /// million others; NaNs stay NaNs of their sign.
+    #[test]
+    fn f64_to_f32_rounds_to_nearest_even() {
+        let check = |x: u64| {
+            let got = super::f32_bits_of_f64(x);
+            let want = (f64::from_bits(x) as f32).to_bits();
+            if f64::from_bits(x).is_nan() {
+                assert!(f32::from_bits(got).is_nan(), "{x:#018x} -> {got:#010x}");
+                assert_eq!(got >> 31, (x >> 63) as u32, "{x:#018x} sign");
+                assert_eq!(got & 0x0040_0000, 0x0040_0000, "{x:#018x} quiet");
+            } else {
+                assert_eq!(got, want, "{x:#018x} ({})", f64::from_bits(x));
+            }
+        };
+        let mut edges = vec![
+            0,
+            1,
+            (1 << 52) - 1,
+            1 << 52,
+            0x7FF0_0000_0000_0000,
+            0x7FF0_0000_0000_0001,
+            0x7FF8_0000_0000_0000,
+            0x7FFF_FFFF_FFFF_FFFF,
+            f64::MAX.to_bits(),
+            f64::from(f32::MAX).to_bits(),
+            f64::from(f32::MIN_POSITIVE).to_bits(),
+            f64::from(f32::from_bits(1)).to_bits(),
+            f64::from(f32::from_bits(0x007F_FFFF)).to_bits(),
+            1.0f64.to_bits(),
+            0.1f64.to_bits(),
+            (1.0f64 / 3.0).to_bits(),
+        ];
+        // Around every f32 exponent: exact values, halfway points (to even
+        // either way), just above and below them, and the largest f32 with
+        // what rounds past it to infinity.
+        for e in 0..2047u64 {
+            for m in [
+                0u64,
+                1,
+                1 << 28,
+                (1 << 28) - 1,
+                (1 << 28) + 1,
+                3 << 28,
+                (1 << 29) - 1,
+                (1 << 52) - 1,
+                0xF_FFFF_E000_0000,
+                0xF_FFFF_F000_0000,
+            ] {
+                edges.push(e << 52 | m);
+            }
+        }
+        for x in edges {
+            check(x);
+            check(x | 1 << 63);
+        }
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..4_000_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            check(s);
+            // The f32 range and below it, where results round or are denormal.
+            let near = (s & 0x800F_FFFF_FFFF_FFFF) | ((s >> 20) % 330 + 700) << 52;
+            check(near);
+        }
+    }
 
     #[test]
     fn packed_pixel_inputs_find_their_second_row() {
