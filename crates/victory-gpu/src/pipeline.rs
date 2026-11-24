@@ -662,6 +662,8 @@ pub(crate) extern "system" fn create_stream(
         };
         at += size;
     }
+    #[cfg(windows)]
+    graphics.settle();
     hand_out(
         shaders,
         #[cfg(windows)]
