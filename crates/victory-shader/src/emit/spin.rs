@@ -12,8 +12,8 @@
 //! These loops get a smaller limit ([`super::spin_limit`]).
 //!
 //! A loop counts as one only when nothing in it can have an effect the
-//! limit would cut short: no stores, exports, LDS writes, barriers or
-//! messages; every memory read and atomic at an address the loop does not
+//! limit would cut short: no stores, atomics, exports, LDS writes,
+//! barriers or messages; every memory read at an address the loop does not
 //! change; and no loop-carried value made by arithmetic (a counter means
 //! the loop does work per iteration). What it carries are lane masks,
 //! compare results and what it read.
@@ -283,9 +283,11 @@ fn access(inst: &crate::ir::Inst) -> Access {
             }
         }
         Fields::Buffer { lds, .. } => {
-            if *lds || name.contains("store") {
+            // An atomic writes memory every time, returning or not: an
+            // effect, as for scalar memory above.
+            if *lds || name.contains("store") || name.contains("atomic") {
                 Access::Effect
-            } else if name.contains("load") || name.contains("atomic") {
+            } else if name.contains("load") {
                 Access::Read
             } else {
                 // Cache invalidations.
@@ -293,7 +295,7 @@ fn access(inst: &crate::ir::Inst) -> Access {
             }
         }
         Fields::Image { .. } => {
-            if name.contains("store") {
+            if name.contains("store") || name.contains("atomic") {
                 Access::Effect
             } else {
                 Access::Read
@@ -459,6 +461,26 @@ mod tests {
             S_ENDPGM,
         ];
         assert_eq!(spins(&counts), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_loop_counting_with_a_buffer_atomic_is_not() {
+        // The spin-wait loop with the load turned into a returning
+        // buffer_atomic_add: every iteration changes memory, so it must keep
+        // the general loop limit (cut short, the counter comes out wrong).
+        let words = [
+            0xBE82_0380, // s_mov_b32 s2, 0
+            0xE0C8_6000,
+            0x8002_0100, // 4: buffer_atomic_add v1, v0, s[8:11], 0 idxen glc
+            0xBF8C_3F70, // s_waitcnt vmcnt(0)
+            0x7D84_0280, // v_cmp_eq_u32 vcc, 0, v1
+            0x8802_026A, // s_or_b32 s2, vcc_lo, s2
+            0x8A7E_027E, // s_andn2_b32 exec_lo, exec_lo, s2
+            0xBF89_FFF9, // s_cbranch_execnz -> 4
+            0x887E_027E, // s_or_b32 exec_lo, exec_lo, s2
+            S_ENDPGM,
+        ];
+        assert!(spins(&words).is_empty());
     }
 
     #[test]
