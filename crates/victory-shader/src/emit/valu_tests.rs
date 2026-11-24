@@ -1774,3 +1774,118 @@ fn ds_swizzle_masked_rotations() {
         }
     }
 }
+
+/// f32 bits of values whose significand and exponent RDNA2 returns exactly:
+/// zeros, infinities, NaNs, normals at both ends of the range and
+/// denormals (normalized: v_frexp works on the bits).
+const FREXP_CASES: &[u32] = &[
+    0x0000_0000, // +0
+    0x8000_0000, // -0
+    0x7f80_0000, // +inf
+    0xff80_0000, // -inf
+    0x7fc0_0000, // NaN
+    0xffc0_0001, // NaN with a payload
+    0x3f80_0000, // 1.0
+    0xbf80_0000, // -1.0
+    0x3eff_ffff, // just below 0.5
+    0x4049_0fdb, // pi
+    0x0080_0000, // smallest normal
+    0x7f7f_ffff, // largest finite
+    0xff7f_ffff,
+    0x0000_0001, // smallest denormal
+    0x8000_0001,
+    0x007f_ffff, // largest denormal
+    0x0040_0000,
+    0x0000_ffff,
+];
+
+/// (significand bits, exponent) as RDNA2's v_frexp_mant_f32 and
+/// v_frexp_exp_i32_f32 give them.
+fn frexp_ref(x: u32) -> (u32, i32) {
+    let field = (x >> 23 & 0xFF) as i32;
+    let frac = x & 0x7F_FFFF;
+    if x & 0x7FFF_FFFF == 0 || field == 0xFF {
+        return (x, 0);
+    }
+    let (frac, e) = if field == 0 {
+        let lz = frac.leading_zeros();
+        ((frac << (lz - 8)) & 0x7F_FFFF, -117 - lz as i32)
+    } else {
+        (frac, field - 126)
+    };
+    (x & 0x8000_0000 | 0x3F00_0000 | frac, e)
+}
+
+#[test]
+fn v_frexp_mant_and_exp_f32_match_rdna2() {
+    let cases: Vec<[u32; 4]> = FREXP_CASES.iter().map(|&x| [x, 0, 0, 0]).collect();
+    // Every case: the significand times 2^exponent gives the input back.
+    for &x in FREXP_CASES {
+        let (m, e) = frexp_ref(x);
+        let back = f64::from(f32::from_bits(m)) * 2f64.powi(e);
+        let want = f64::from(f32::from_bits(x));
+        assert!(back == want || want.is_nan(), "{x:#010x}");
+    }
+    // v_frexp_mant_f32 v0, v1 (VOP1 0x40)
+    let mant = build_valu_cs(&[vop1(0x040, 0, vgpr(1))]);
+    run_cases(&mant, &cases, |backend, _, inp, got| {
+        let want = frexp_ref(inp[0]).0;
+        assert_eq!(
+            got, want,
+            "{backend}: v_frexp_mant_f32({:#010x}) = {got:#010x}, want {want:#010x}",
+            inp[0],
+        );
+    });
+    // v_frexp_exp_i32_f32 v0, v1 (VOP1 0x3f)
+    let exp = build_valu_cs(&[vop1(0x03f, 0, vgpr(1))]);
+    run_cases(&exp, &cases, |backend, _, inp, got| {
+        let want = frexp_ref(inp[0]).1;
+        assert_eq!(
+            got as i32, want,
+            "{backend}: v_frexp_exp_i32_f32({:#010x}) = {}, want {want}",
+            inp[0], got as i32,
+        );
+    });
+}
+
+#[test]
+fn v_ldexp_f32_scales_by_any_exponent() {
+    // v_ldexp_f32 v0, v1, v2 (VOP3 0x362). Results stay normal (or zero,
+    // or infinity) so the host's denormal mode cannot change them.
+    let shader = build_valu_cs(&vop3(0x362, 0, vgpr(1), vgpr(2), 0));
+    let inf = f32::INFINITY.to_bits();
+    let cases: &[(u32, i32, u32)] = &[
+        (1.0f32.to_bits(), 0, 1.0f32.to_bits()),
+        (1.0f32.to_bits(), 127, 0x7f00_0000),
+        (1.0f32.to_bits(), 128, inf),
+        (1.0f32.to_bits(), -126, 0x0080_0000),
+        (1.5f32.to_bits(), -1, 0.75f32.to_bits()),
+        ((-3.0f32).to_bits(), 4, (-48.0f32).to_bits()),
+        // Exponents past what one power-of-two factor holds.
+        (0x0080_0000, 253, 0x7f00_0000),
+        (0x7f00_0000, -253, 0x0080_0000),
+        (0x0080_0000, 254, inf),
+        (0x7f7f_ffff, -253, 0x00ff_ffff),
+        // Overflow and underflow from any finite nonzero input.
+        (0x0080_0000, i32::MAX, inf),
+        ((-1.0e-30f32).to_bits(), 1000, 0xff80_0000),
+        (0x7f7f_ffff, i32::MIN, 0),
+        ((-0.5f32).to_bits(), -400, 0x8000_0000),
+        // Zeros, infinities and NaN keep their value.
+        (0x8000_0000, 1000, 0x8000_0000),
+        (inf, -1000, inf),
+        (0xff80_0000, 0, 0xff80_0000),
+    ];
+    let inputs: Vec<[u32; 4]> = cases.iter().map(|&(x, e, _)| [x, e as u32, 0, 0]).collect();
+    run_cases(&shader, &inputs, |backend, i, inp, got| {
+        let want = cases[i].2;
+        assert_eq!(
+            got, want,
+            "{backend}: v_ldexp_f32({:#010x}, {}) = {got:#010x}, want {want:#010x}",
+            inp[0], inp[1] as i32,
+        );
+    });
+    run_cases(&shader, &[[0x7fc0_0000, 10, 0, 0]], |backend, _, _, got| {
+        assert!(f32::from_bits(got).is_nan(), "{backend}: {got:#010x}");
+    });
+}

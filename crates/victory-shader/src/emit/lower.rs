@@ -1823,6 +1823,85 @@ impl<'a> Lower<'a> {
         self.s.m.select(c, exact, zero, r)
     }
 
+    /// `x * 2^e` for any i32 `e`, rounded once unless the result is a
+    /// denormal. DXIL has no ldexp: `x` is multiplied by three powers of
+    /// two that are each a normal float. Past ±375 any finite nonzero `x`
+    /// is already at zero or infinity, so `e` is clamped to [-375, 378],
+    /// which keeps each of q, q and e - 2q (q = e / 3) inside [-126, 127].
+    fn ldexp(&mut self, x: V, e: V) -> V {
+        let c = self.cur;
+        let (lo, hi) = (self.s.m.i32(-375i32 as u32), self.s.m.i32(378));
+        let below = self.s.m.cmp(c, pred::SLT, e, lo);
+        let e = self.s.m.select(c, below, lo, e);
+        let above = self.s.m.cmp(c, pred::SGT, e, hi);
+        let e = self.s.m.select(c, above, hi, e);
+        let three = self.s.m.i32(3);
+        let q = self.s.m.bin(c, Bin::SDiv, e, three);
+        let two_q = self.s.m.bin(c, Bin::Add, q, q);
+        let rest = self.s.m.bin(c, Bin::Sub, e, two_q);
+        let mut r = x;
+        for k in [q, q, rest] {
+            // 2^k for k in [-126, 127]: the biased exponent alone.
+            let (bias, at) = (self.s.m.i32(127), self.s.m.i32(23));
+            let biased = self.s.m.bin(c, Bin::Add, k, bias);
+            let bits = self.s.m.bin(c, Bin::Shl, biased, at);
+            let factor = self.as_float(bits);
+            r = self.s.m.bin(c, Bin::Mul, r, factor);
+        }
+        r
+    }
+
+    /// The significand (bits of a float with magnitude in [0.5, 1), the
+    /// sign kept) and the exponent of the f32 with bits `x`, so that
+    /// x = significand * 2^exponent, worked on the bits so that denormals
+    /// are normalized whatever the host's float mode. Zero gives itself and
+    /// 0; infinity and NaN give themselves and 0.
+    fn frexp(&mut self, x: V) -> (V, V) {
+        let c = self.cur;
+        let k = |l: &mut Self, v: u32| l.s.m.i32(v);
+        let (at, ff) = (k(self, 23), k(self, 0xFF));
+        let field = self.s.m.bin(c, Bin::LShr, x, at);
+        let field = self.s.m.bin(c, Bin::And, field, ff);
+        let frac_mask = k(self, 0x7F_FFFF);
+        let frac = self.s.m.bin(c, Bin::And, x, frac_mask);
+        let sign_mask = k(self, 0x8000_0000);
+        let sign = self.s.m.bin(c, Bin::And, x, sign_mask);
+        // A denormal's leading one at bit 31 - lz moves to bit 23.
+        let lz = self.s.op(
+            c,
+            "unaryBits.i32",
+            Attr::ReadNone,
+            self.s.t.i32,
+            33,
+            &[frac],
+        );
+        let (eight, k31) = (k(self, 8), k(self, 31));
+        let sh = self.s.m.bin(c, Bin::Sub, lz, eight);
+        let sh = self.s.m.bin(c, Bin::And, sh, k31);
+        let normalized = self.s.m.bin(c, Bin::Shl, frac, sh);
+        let normalized = self.s.m.bin(c, Bin::And, normalized, frac_mask);
+        let zero = k(self, 0);
+        let denormal = self.s.m.cmp(c, pred::EQ, field, zero);
+        let frac = self.s.m.select(c, denormal, normalized, frac);
+        let half = k(self, 0x3F00_0000);
+        let m = self.s.m.bin(c, Bin::Or, sign, half);
+        let m = self.s.m.bin(c, Bin::Or, m, frac);
+        // Exponents: field - 126, or -117 - lz for a denormal.
+        let (k126, k117) = (k(self, 126), k(self, -117i32 as u32));
+        let e_normal = self.s.m.bin(c, Bin::Sub, field, k126);
+        let e_denormal = self.s.m.bin(c, Bin::Sub, k117, lz);
+        let e = self.s.m.select(c, denormal, e_denormal, e_normal);
+        // Zero, infinity and NaN.
+        let magnitude = k(self, 0x7FFF_FFFF);
+        let magnitude = self.s.m.bin(c, Bin::And, x, magnitude);
+        let is_zero = self.s.m.cmp(c, pred::EQ, magnitude, zero);
+        let special = self.s.m.cmp(c, pred::EQ, field, ff);
+        let keep = self.s.m.bin(c, Bin::Or, is_zero, special);
+        let m = self.s.m.select(c, keep, x, m);
+        let e = self.s.m.select(c, keep, zero, e);
+        (m, e)
+    }
+
     /// The high dword of a 32 × 32-bit product.
     fn mul_hi(&mut self, a: V, b: V, signed: bool) -> V {
         let c = self.cur;
@@ -4575,6 +4654,22 @@ impl<'a> Lower<'a> {
                     self.write_placed(inst, Reg::V(sreg), a, guard);
                 }
                 Ok(())
+            }
+            "v_ldexp_f32" => {
+                let (x, e) = (f(self, 0)?, s(self, 1)?);
+                let r = self.ldexp(x, e);
+                float(self, r)
+            }
+            "v_frexp_mant_f32" | "v_frexp_exp_i32_f32" => {
+                let x = f(self, 0)?;
+                let x = self.as_int(x);
+                let (m, e) = self.frexp(x);
+                if name == "v_frexp_mant_f32" {
+                    let m = self.as_float(m);
+                    float(self, m)
+                } else {
+                    int(self, e)
+                }
             }
             "v_ffbh_u32" | "v_ffbh_i32" => {
                 // Counted from the top bit, -1 when none (DXIL's too).
