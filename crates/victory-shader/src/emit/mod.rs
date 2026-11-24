@@ -434,6 +434,7 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::bitcode::Attr;
     use super::lower::LOOP_LIMIT;
     use super::parse_loop_limit;
@@ -457,9 +458,10 @@ mod tests {
         assert_eq!(parse_limit(Some("0x40"), DEFAULT_SPIN_LIMIT), 64);
         assert_eq!(parse_limit(Some("0"), DEFAULT_SPIN_LIMIT), 4096);
         // Spin waits never get more than the general limit.
-        assert!(DEFAULT_SPIN_LIMIT <= LOOP_LIMIT);
+        const { assert!(DEFAULT_SPIN_LIMIT <= LOOP_LIMIT) };
     }
     use super::container::SigElement;
+    #[cfg(windows)]
     use super::shader::Shader;
     use super::*;
     use crate::native::{ComputeIo, StageIo};
