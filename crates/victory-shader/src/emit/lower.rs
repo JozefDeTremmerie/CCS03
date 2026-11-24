@@ -2809,7 +2809,7 @@ impl<'a> Lower<'a> {
             "min_u32" => Some(Rmw::UMin),
             "max_u32" => Some(Rmw::UMax),
             "wrxchg_b32" => Some(Rmw::Xchg),
-            "cmpst_b32" | "max_f32" | "min_f32" => None,
+            "cmpst_b32" | "max_f32" | "min_f32" | "rsub_u32" | "inc_u32" | "dec_u32" => None,
             _ => return Err("an LDS operation"),
         };
         let v0 = self.vgprs(inst, data.first().ok_or("an LDS atomic")?, 1)?[0];
@@ -2823,13 +2823,32 @@ impl<'a> Lower<'a> {
             None => self.s.m.i32(0),
         };
         let p = dword(self, offset);
-        if let Some(max) = match op.as_str() {
-            "max_f32" => Some(true),
-            "min_f32" => Some(false),
-            _ => None,
-        } {
+        if matches!(
+            op.as_str(),
+            "max_f32" | "min_f32" | "rsub_u32" | "inc_u32" | "dec_u32"
+        ) {
             let at = self.begin_guarded(guard);
-            let r = self.lds_float_min_max(p, v0, max);
+            let r = match op.as_str() {
+                "max_f32" => self.lds_float_min_max(p, v0, true),
+                "min_f32" => self.lds_float_min_max(p, v0, false),
+                "rsub_u32" => self.lds_cas_loop(p, |l, old| l.s.m.bin(l.cur, Bin::Sub, v0, old)),
+                "inc_u32" => self.lds_cas_loop(p, |l, old| {
+                    let c = l.cur;
+                    let (zero, one) = (l.s.m.i32(0), l.s.m.i32(1));
+                    let at_limit = l.s.m.cmp(c, pred::IUGE, old, v0);
+                    let next = l.s.m.bin(c, Bin::Add, old, one);
+                    l.s.m.select(c, at_limit, zero, next)
+                }),
+                _ => self.lds_cas_loop(p, |l, old| {
+                    let c = l.cur;
+                    let (zero, one) = (l.s.m.i32(0), l.s.m.i32(1));
+                    let is_zero = l.s.m.cmp(c, pred::EQ, old, zero);
+                    let above = l.s.m.cmp(c, pred::IUGT, old, v0);
+                    let wrap = l.s.m.bin(c, Bin::Or, is_zero, above);
+                    let prev = l.s.m.bin(c, Bin::Sub, old, one);
+                    l.s.m.select(c, wrap, v0, prev)
+                }),
+            };
             let r = self.end_guarded(at, &[(r, outside)])[0];
             if let Some(reg) = dst_reg {
                 self.write(inst, Reg::V(reg), r, None);
@@ -2852,6 +2871,26 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// Atomic read-modify-write on the LDS dword at `p` via a compare-exchange
+    /// loop; `next` computes the value to store from the old dword, and the
+    /// old dword returns.
+    fn lds_cas_loop(&mut self, p: V, next: impl FnOnce(&mut Self, V) -> V) -> V {
+        let pre = self.cur;
+        let init = self.s.m.load(pre, p);
+        let (lp, exit) = (self.s.m.new_block(), self.s.m.new_block());
+        self.s.m.terminate(pre, Term::Br(lp));
+        let i32t = self.s.t.i32;
+        let old = self.s.m.phi(lp, i32t);
+        self.cur = lp;
+        let new = next(self, old);
+        let prev = self.s.m.cmpxchg(lp, p, old, new);
+        let done = self.s.m.cmp(lp, pred::EQ, prev, old);
+        self.s.m.set_phi(old, vec![(init, pre), (prev, lp)]);
+        self.s.m.terminate(lp, Term::CondBr(done, exit, lp));
+        self.cur = exit;
+        old
+    }
+
     /// `ds_max_f32` (`max`) or `ds_min_f32` on the LDS dword at `p` with
     /// the float bits `data`; the old bits return.
     ///
@@ -2864,20 +2903,7 @@ impl<'a> Lower<'a> {
     // shortcut: f32 denormals compare as kept; with the console's MODE
     // flushing them they would order as ±0 first (MODE is not modelled).
     fn lds_float_min_max(&mut self, p: V, data: V, max: bool) -> V {
-        let pre = self.cur;
-        let init = self.s.m.load(pre, p);
-        let (lp, exit) = (self.s.m.new_block(), self.s.m.new_block());
-        self.s.m.terminate(pre, Term::Br(lp));
-        let i32t = self.s.t.i32;
-        let old = self.s.m.phi(lp, i32t);
-        self.cur = lp;
-        let new = self.lds_float_pick(old, data, max);
-        let prev = self.s.m.cmpxchg(lp, p, old, new);
-        let done = self.s.m.cmp(lp, pred::EQ, prev, old);
-        self.s.m.set_phi(old, vec![(init, pre), (prev, lp)]);
-        self.s.m.terminate(lp, Term::CondBr(done, exit, lp));
-        self.cur = exit;
-        old
+        self.lds_cas_loop(p, |l, old| l.lds_float_pick(old, data, max))
     }
 
     /// What `ds_max_f32` (`max`) or `ds_min_f32` writes over the dword

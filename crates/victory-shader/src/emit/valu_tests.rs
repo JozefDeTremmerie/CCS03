@@ -1179,6 +1179,96 @@ fn ds_min_max_f32_are_atomic_across_waves() {
     }
 }
 
+#[test]
+fn ds_rsub_inc_dec_u32_match_rdna2() {
+    const DS_RSUB_U32: u8 = 0x02;
+    const DS_INC_U32: u8 = 0x03;
+    const DS_DEC_U32: u8 = 0x04;
+    const DS_RSUB_RTN_U32: u8 = 0x22;
+    const DS_INC_RTN_U32: u8 = 0x23;
+    const DS_DEC_RTN_U32: u8 = 0x24;
+
+    let cases: &[(u32, u32)] = &[
+        (0, 0),
+        (0, 5),
+        (3, 5),
+        (5, 5),
+        (7, 5),
+        (1, 0),
+        (u32::MAX, 5),
+        (5, u32::MAX),
+        (u32::MAX, u32::MAX),
+    ];
+    let inputs: Vec<[u32; 4]> = cases.iter().map(|&(old, data)| [old, data, 0, 0]).collect();
+
+    type Op = (&'static str, u8, u8, fn(u32, u32) -> u32);
+    let ops: &[Op] = &[
+        ("ds_rsub_u32", DS_RSUB_U32, DS_RSUB_RTN_U32, |old, data| {
+            data.wrapping_sub(old)
+        }),
+        ("ds_inc_u32", DS_INC_U32, DS_INC_RTN_U32, |old, data| {
+            if old >= data { 0 } else { old.wrapping_add(1) }
+        }),
+        ("ds_dec_u32", DS_DEC_U32, DS_DEC_RTN_U32, |old, data| {
+            if old == 0 || old > data { data } else { old - 1 }
+        }),
+    ];
+
+    for &(what, plain, rtn, ref_fn) in ops {
+        // Each thread uses its own LDS dword at `v5 = v0 << 2` so 64 threads
+        // run without contention and the pipeline runs on both hardware and WARP.
+        let mut returns_old = vec![vop2(0x1A, 5, 0x80 + 2, 0)]; // v_lshlrev_b32 v5, 2, v0
+        returns_old.extend(ds(DS_WRITE_B32, 0, 5, 1));
+        returns_old.extend(ds(rtn, 0, 5, 2));
+
+        let mut returns_new = vec![vop2(0x1A, 5, 0x80 + 2, 0)];
+        returns_new.extend(ds(DS_WRITE_B32, 0, 5, 1));
+        returns_new.extend(ds(plain, 0, 5, 2));
+        returns_new.extend(ds(DS_READ_B32, 0, 5, 0));
+
+        for (body, old_result) in [(returns_old, true), (returns_new, false)] {
+            let shader = build_cs(&body, 64, 512);
+            run_cases(&shader, &inputs, |backend, _, inp, got| {
+                let want = if old_result {
+                    inp[0]
+                } else {
+                    ref_fn(inp[0], inp[1])
+                };
+                assert_eq!(
+                    got,
+                    want,
+                    "{backend}: {what}({:#x}, {:#x}) = {got:#x}, want {want:#x} ({})",
+                    inp[0],
+                    inp[1],
+                    if old_result { "old" } else { "new" },
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn ds_inc_u32_is_atomic_across_waves() {
+    const DS_INC_U32: u8 = 0x03;
+    // 64 threads increment LDS[0] with wrap limit `limit`; since (x + 1) mod (limit + 1)
+    // is commutative, the final value after 64 increments from 0 is 64 % (limit + 1).
+    for (limit, want) in [(100u32, 64u32), (9, 4)] {
+        let mut body = vec![vop1(0x001, 5, 0x80)];
+        body.extend(ds(DS_WRITE_B32, 0, 5, 1));
+        body.push(S_BARRIER);
+        body.extend(ds(DS_INC_U32, 0, 5, 2));
+        body.push(S_BARRIER);
+        body.extend(ds(DS_READ_B32, 0, 5, 0));
+        let shader = build_cs(&body, 64, 512);
+        run_cases(&shader, &[[0, limit, 0, 0]], |backend, _, _, got| {
+            assert_eq!(
+                got, want,
+                "{backend}: 64x ds_inc_u32(limit={limit}) = {got}, want {want}",
+            );
+        });
+    }
+}
+
 /// Runs VOP1 `op` on each input and compares the result dword.
 fn check_cvt(name: &str, op: u16, cases: &[(u32, u32)]) {
     let shader = build_valu_cs(&[vop1(op, 0, vgpr(1))]);
