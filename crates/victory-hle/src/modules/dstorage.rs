@@ -788,9 +788,15 @@ extern "system" fn close(this: QueueRef) {
     close_lane(unsafe { &*this }.state.id);
 }
 
-/// The file path for a file-backed request, or `None` for memory sources.
+const SUPPORTED_OPTIONS: u64 = ZLIB | BCPACK | PAGE_DESTINATION | MEMORY_SOURCE;
+
+/// The file path for a file-backed request, or `None` for memory sources
+/// or requests with unsupported option bits (whose `source` may not be a `File`).
 fn source_path(request: &Request) -> Option<&str> {
-    if request.options & MEMORY_SOURCE != 0 || request.source.is_null() {
+    if request.options & !SUPPORTED_OPTIONS != 0
+        || request.options & MEMORY_SOURCE != 0
+        || request.source.is_null()
+    {
         return None;
     }
     // SAFETY: a file object we created; the title keeps it open.
@@ -819,7 +825,7 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         );
         hr
     };
-    if options & !(ZLIB | BCPACK | PAGE_DESTINATION | MEMORY_SOURCE) != 0 {
+    if options & !SUPPORTED_OPTIONS != 0 {
         return Err(fail(E_NOTIMPL, "unsupported options"));
     }
     if request.source.is_null() || request.destination.is_null() {
@@ -1242,6 +1248,17 @@ mod tests {
         );
         assert_eq!(source_path(&mem_req), None);
         assert_eq!(execute(&mem_req), Err(INVALID_DATA));
+
+        let unsupported_req = request(
+            ZLIB | (1 << 23),
+            out.as_mut_ptr().cast(),
+            out.len(),
+            corrupt.as_ptr().cast(),
+            0,
+            corrupt.len(),
+        );
+        assert_eq!(source_path(&unsupported_req), None);
+        assert_eq!(execute(&unsupported_req), Err(E_NOTIMPL));
     }
 
     #[test]
