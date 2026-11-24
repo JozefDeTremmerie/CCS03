@@ -26,6 +26,7 @@ Windows with an NVIDIA GPU (32-lane waves).
 | CCS03 PR 10: a 1080p display is reported by default, so the title's targets fit an 8 GB card (`VICTORY_DISPLAY_MODE=3840x2160` for 4K) | 9hvn9yt2vk-netizen |
 | CCS03 PR 11: the depth bounds test is passed through to host pipelines and command lists (victory-fork PR 82) | Kaivyyy |
 | CCS03 PR 12: texture reads wait only for remappings of their own bytes (victory-fork PR 95) | LastThylacine |
+| victory-fork PR 159: refresh video textures more often after a change without a tracked write, preventing stale intro frames | NuraadGit |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
 of the title and the technical details. When merging victory-fork `main`,
