@@ -144,7 +144,10 @@ extern "system" fn open_file(_: Factory, path: *const u16, iid: *const Guid, out
     tracing::info!(path = name, iid = iid_text(iid), "dstorage: file opened");
     // SAFETY: a handle we just opened and nobody else owns.
     let file = unsafe { std::fs::File::from_raw_handle(handle) };
-    let file = Instance::create(Object::new("dstorage file", &FILE_VTABLE), File { file });
+    let file = Instance::create(
+        Object::new("dstorage file", &FILE_VTABLE),
+        File { file, path: name },
+    );
     put(out, file)
 }
 
@@ -258,6 +261,7 @@ static FACTORY_VTABLE: Methods<16> = Methods([
 
 struct File {
     file: std::fs::File,
+    path: String,
 }
 
 static FILE_VTABLE: Methods<8> = Methods([
@@ -784,6 +788,19 @@ extern "system" fn close(this: QueueRef) {
     close_lane(unsafe { &*this }.state.id);
 }
 
+/// The file path for a file-backed request, or `None` for memory sources.
+fn source_path(request: &Request) -> Option<&str> {
+    if request.options & MEMORY_SOURCE != 0 || request.source.is_null() {
+        return None;
+    }
+    // SAFETY: a file object we created; the title keeps it open.
+    Some(
+        &unsafe { &*request.source.cast::<Instance<File>>() }
+            .state
+            .path,
+    )
+}
+
 /// Reads, inflates and/or unpacks, and writes one request.
 fn execute(request: &Request) -> Result<(), HRESULT> {
     let options = request.options;
@@ -796,6 +813,7 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
             intermediate_size = request.intermediate_size,
             tag = request.tag,
             name = text(request.name),
+            path = source_path(request),
             hr = format_args!("{:#010x}", hr as u32),
             "dstorage: request failed: {why}"
         );
@@ -1195,6 +1213,35 @@ mod tests {
         void(queue, 0x30);
         assert_eq!(wait(array, 0), S_OK);
         assert_eq!(out, plain);
+    }
+
+    #[test]
+    fn corrupt_zlib_file_fails_and_keeps_source_path() {
+        let corrupt = [0x78u8, 0x9c, 0xff, 0xff, 0x00, 0x01];
+        let (_dir, file) = file_with(&corrupt);
+        let mut out = [0u8; 32];
+
+        let file_req = request(
+            ZLIB,
+            out.as_mut_ptr().cast(),
+            out.len(),
+            file,
+            0,
+            corrupt.len(),
+        );
+        assert!(source_path(&file_req).is_some_and(|p| p.ends_with("data.bin")));
+        assert_eq!(execute(&file_req), Err(INVALID_DATA));
+
+        let mem_req = request(
+            ZLIB | MEMORY_SOURCE,
+            out.as_mut_ptr().cast(),
+            out.len(),
+            corrupt.as_ptr().cast(),
+            0,
+            corrupt.len(),
+        );
+        assert_eq!(source_path(&mem_req), None);
+        assert_eq!(execute(&mem_req), Err(INVALID_DATA));
     }
 
     #[test]
