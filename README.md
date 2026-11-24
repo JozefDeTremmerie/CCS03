@@ -1,143 +1,84 @@
-# VIctory
+# CCS03
 
-> This is CCS03, a fork of [VIctory](https://github.com/Marvisak/VIctory)
-> with reviewed and tested upstream pull requests added on top. See
-> [CCS03.md](CCS03.md) for what is in it and why, and
-> [CONTRIBUTING.md](CONTRIBUTING.md) to work on it. Everything below is
-> upstream's README.
+CCS03 is a community fork of [VIctory](https://github.com/Marvisak/VIctory),
+Marvisak's compatibility layer that runs the Xbox Series X|S version of Grand
+Theft Auto VI on Windows, from files the user supplies. VIctory does the heavy
+lifting. CCS03 is where a small team reviews, combines and tests fixes before
+upstream merges them, and builds its own on top.
 
-Runs Grand Theft Auto VI (Xbox Series X|S) natively on Windows, from files
-the user supplies.
+No game files are in this repository or needed to develop it. To run the
+game you need your own copy.
 
-The title's x86-64 code runs unchanged inside our process; VIctory supplies
-the platform underneath it and converts the title's data, ahead of time where
-it can and on first use where it must (shaders). See
-[docs/architecture.md](docs/architecture.md).
+## What CCS03 adds
 
-## Status (2026-11-23)
+- **Reviewed upstream pull requests, ahead of upstream.** 19 open pull
+  requests are merged into the `ccs03` branch. Each one is checked first: is
+  it already upstream, do its reviewers report problems, does it merge
+  cleanly, and does the whole test suite pass on Windows with an NVIDIA GPU
+  (32-lane waves). The list, with authors, is in [CCS03.md](CCS03.md).
+- **Our own fixes.** Shader and GPU fixes from CCS03 contributors (for
+  example `v_ldexp_f32` / `v_frexp_*`, and raw buffer views that do not
+  start on 16 bytes), plus the changes needed to make the merged pull
+  requests build together, and a correction to one of them (PR 452 counted
+  buffer atomics as reads). Details in [CCS03.md](CCS03.md).
+- **A focus on NVIDIA and Windows 10.** Upstream is tested on one machine
+  (Windows 11, AMD). CCS03 tests on NVIDIA cards, which run 32-lane waves,
+  and is working on Windows 10 support (see below).
+- **Tooling for contributors.** One script sets up a clone and one runs the
+  tests and Clippy as upstream's CI does. A commit hook keeps game data out
+  of the history, and [AGENTS.md](AGENTS.md) gives people and AI agents the
+  same rules.
 
-**Not playable yet.** The title boots, runs its menus at its own 30 fps and
-loads the world, where rendering fails.
+## Status
 
-| Stage | State |
-|-------|-------|
-| Boot, first-boot screens (accessibility, language, settings, legal) | works, 30 fps |
-| Intro video with sound | works |
-| Start screen, profile and saves | works |
-| Loading into the world (about 50 s) | works |
-| The world (first mission's intro) | reached and runs with indirect draws; its title card renders, the scene after it is still dark; 0.5-1.8 s per frame |
+CCS03 follows upstream `main` (base `ffe310e`). For what the game does today,
+see [the status section of upstream's README](https://github.com/Marvisak/VIctory#readme).
+CCS03 makes no claims of its own about the game until they are reproduced on
+our own hardware.
 
-Tested on one machine: Windows 11, AMD RX 6700 XT.
+## Windows 10 (in progress)
 
-> **Warning.** Entering the world on a real GPU can currently hang it, and
-> Windows then resets the display driver (every monitor goes black for a
-> moment). To look further, use a diagnostics build with
-> `VICTORY_D3D12_WARP=1`, which renders on the software adapter.
+The title's root signatures use directly indexed descriptor heaps (shader
+model 6.6). The D3D12 runtime built into Windows 10 refuses them, so no
+pipeline can be made and the screen stays black. Windows 11 is not affected.
 
-What each part does today and what it still needs:
-
-| Subsystem | Today | Needs |
-|-----------|-------|-------|
-| Loader | Runs the title's executable and its DLLs in our process; crash reports name the faulting code and are kept in `crashes.log` | – |
-| Runtime services | One signed-in offline user, licences, packages, saves that survive a kill at any step, text entry dialog | Speech is silent; the dialog and relaunch are untested live |
-| Network | Offline by design: the title cannot reach the network | – |
-| Files and streaming | Archives and streamed data read, zlib and BCPack decoded in parallel | Loading is limited by writes into title memory |
-| Input | XInput pads, keyboard, keyboard stand-in pad | Trigger rumble |
-| Audio | Menu, video and loading sound; XMA voices and Opus streams decode | Reverb is silent; Opus results unverified against the title |
-| GPU: menus | Draws, compute and presentation on host D3D12; only changed title memory is copied | Frame pacing drifts on one screen in release builds |
-| GPU: world | Mesh pipelines, shader-written buffers, descriptor lifetimes, indirect execution (arguments clamped), pipelines made by worker threads and kept on disk | Most of the scene is still missing (untranslated shaders drop draws); frames take seconds; real queries, depth bounds, HDR and scaling are missing |
-| Shaders | Console GPU code recompiled to DXIL at first use, cached on disk. Menus: all. World: mesh 8,191 of 8,506, vertex/pixel 10,617 of 12,346, compute 1,643 of 2,539 | 64-bit image atomics, merged geometry stages, the ray-tracing builder's shaders; some compute programs need a GPU with 64-lane waves |
-| Textures | Console tiled layouts and detiling for the modes the title uses | Render-target metadata planes |
-| Series S mode | Runs through the menus to the loading screen | The world, as above |
+The fix is the DirectX 12 Agility SDK: `victory.exe` exports
+`D3D12SDKVersion`, and Windows then loads a newer `D3D12Core.dll` from a
+`D3D12` folder beside it. Upstream PR 968 does this. It is being tested for
+CCS03 and is not in `ccs03` yet. Microsoft's DLLs are never committed here.
 
 ## Getting started
 
-Requirements: Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with
-shader model 6.6 (and mesh shaders for the world), Rust (pinned in
-`rust-toolchain.toml`).
+- **Working on CCS03:** see [CONTRIBUTING.md](CONTRIBUTING.md). Work happens
+  on the `ccs03` branch through pull requests.
+- **Building:** the same as upstream:
+  `cargo build --release -p victory`. Requirements: Windows 10/11 x64, a CPU
+  with AVX2, a Direct3D 12 GPU with shader model 6.6 (and mesh shaders for the
+  world), and Rust as pinned in `rust-toolchain.toml`.
+- **Running, environment variables and architecture:** see
+  [upstream's README](https://github.com/Marvisak/VIctory#readme) and
+  [docs/architecture.md](docs/architecture.md).
 
-The title also needs several GiB of available Windows commit at startup.
-Check **Committed** under **Task Manager → Performance → Memory**. If
-`crashes.log` reports Windows error 1455, close other applications or increase
-the Windows paging file size, then retry.
+## Team
 
-```powershell
-cargo xtask install-hooks                # asset-policy check on every commit
-copy victory.example.toml victory.toml   # then set your paths (outside the repo)
-cargo test --workspace                   # needs no game data
-cargo run -p victory -- config           # check your paths
-```
+| GitHub | Role |
+|---|---|
+| [JozefDeTremmerie](https://github.com/JozefDeTremmerie) | Maintainer: reviews and merges |
+| [9hvn9yt2vk-netizen](https://github.com/9hvn9yt2vk-netizen) | Contributor: shader and GPU fixes |
 
-Run the title:
+The authors of the upstream pull requests in CCS03 are credited in
+[CCS03.md](CCS03.md). Fixes that are useful beyond CCS03 are offered back to
+upstream as pull requests.
 
-```powershell
-cargo build --release -p victory
-target\release\victory.exe run <game dir>\<the title's exe> --execute
-```
+## Licence and rules
 
-The window caption shows the framerate. Saves, settings and `crashes.log`
-are kept under the data folder (default `%LOCALAPPDATA%\victory\data`), derived
-data under the cache folder.
+CCS03 is licensed under GPL-3.0-or-later, like VIctory (see
+[LICENSE](LICENSE)). VIctory's copyright notices stay in place.
 
-Input: XInput pads. With none connected the keyboard is a pad while the
-title's window has focus:
+Never add game files or anything derived from them, code under an
+incompatible licence (XCL is GPL-2.0-only), tools or keys to break the
+game's protection, or Rockstar or GTA artwork. The full list is in
+[AGENTS.md](AGENTS.md).
 
-| Keys | Pad |
-|------|-----|
-| W A S D / I J K L | left / right stick |
-| arrows | D-pad |
-| Enter, Backspace, X, Y | A, B, X, Y |
-| Q / E, Z / C | shoulders, triggers |
-| F / H | stick clicks |
-| Esc, Tab | Menu, View |
-
-## Commands
-
-```
-victory inspect <exe|dll> [--imports] [--exports]
-victory census [paths...] [--missing] [--strict]
-victory lib-exports <import.lib> [--list]
-victory shader-info [paths...] [--verbose] [--disasm]
-victory translate [paths...] [--validate] [--pipelines] [--list] [--jobs N]
-victory run <exe> [--execute] [--unimplemented trap|zero] [--strict]
-            [--console series-x|series-s] [-- <title arguments>]
-victory config
-```
-
-Logging: `VICTORY_LOG=victory_loader=trace,info` (a release build logs
-info and above).
-
-## Debugging
-
-A release build has no debugging aids. Build them in with
-
-```powershell
-cargo build --profile diag -p victory --features diagnostics   # target\diag\victory.exe
-```
-
-| Variable | Effect |
-|----------|--------|
-| `VICTORY_LOG=<target>=debug,...` | debug and trace output |
-| `VICTORY_STACKS=20,60` | every thread's stack at those seconds |
-| `VICTORY_WATCH=<rva>,...` | logs a title u32 when it changes |
-| `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
-| `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
-| `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
-| `VICTORY_D3D12_DEBUG=1` | host debug layer |
-| `VICTORY_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
-| `VICTORY_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
-| `VICTORY_SKIP_PIPELINES=<hash>,...` | omit draws and dispatches, including indirect ones, whose pipeline contains a listed 16-digit shader hash |
-| `VICTORY_GPU_TIMING=1` | with the above, each list of a submission run and timed on its own; slow lists logged with their slowest commands |
-| `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
-| `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 16384 (2^14, below the host's ~2 s GPU watchdog; own shader cache entries; works in release builds too); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow; a higher `n` shows whether a wrong result comes from a legitimate loop the default cut short |
-| `VICTORY_SHADER_SPIN_LIMIT=<n>` | loops that only reread memory until another workgroup or queue changes it (spin waits) stop after `n` iterations per lane instead of 4096 (own shader cache entries); never more than the general limit; `16384` gives them the general limit |
-| `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
-| `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
-
-Every build appends crashes and host GPU failures to `crashes.log` in the
-title's data folder.
-
-## License
-
-GPL-3.0-or-later. See [LICENSE](LICENSE).
+CCS03 is unofficial and not affiliated with Rockstar Games, Take-Two
+Interactive or Microsoft.
