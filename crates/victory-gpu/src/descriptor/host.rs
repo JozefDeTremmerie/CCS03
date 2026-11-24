@@ -581,6 +581,15 @@ fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
     ))
 }
 
+/// Whether a raw buffer view may start at element `first` (4 bytes each):
+/// the host wants 16-byte aligned starts, the console only 4, and refuses
+/// the call (removing the device) for the rest.
+/// shortcut: a view the host refuses reads nothing (a null view); starting
+/// it 16 bytes lower would need the shader to add the difference.
+fn raw_start_fits(first: u64) -> bool {
+    first.is_multiple_of(4)
+}
+
 /// The host resource a slot made by [`make`] views, if any.
 type Kept = Option<ID3D12Resource>;
 
@@ -622,6 +631,11 @@ fn buffer_srv(
     if buffer.NumElements == 0 {
         let first = buffer.FirstElement;
         once!(first, "buffer view of no elements");
+        return None;
+    }
+    if buffer.Flags.0 & D3D12_BUFFER_SRV_FLAG_RAW.0 != 0 && !raw_start_fits(buffer.FirstElement) {
+        let first = buffer.FirstElement;
+        once!(first, "raw buffer view not on 16 bytes of its host copy");
         return None;
     }
     let host = host()?;
@@ -684,6 +698,14 @@ fn buffer_uav(
     if buffer.NumElements == 0 {
         let first = buffer.FirstElement;
         once!(first, "buffer view of no elements");
+        return None;
+    }
+    if buffer.Flags.0 & D3D12_BUFFER_UAV_FLAG_RAW.0 != 0 && !raw_start_fits(buffer.FirstElement) {
+        let first = buffer.FirstElement;
+        once!(
+            first,
+            "raw unordered buffer view not on 16 bytes of its host copy"
+        );
         return None;
     }
     buffer.CounterOffsetInBytes = 0;
@@ -1410,6 +1432,151 @@ mod tests {
             assert!(removed.is_ok(), "device removed: {removed:?} (unordered: {unordered})");
         }
         crate::shadow::unregister(usize::MAX - 1, address);
+    }
+
+    /// Raw views start on 16 bytes on the host: element (4 bytes) 0, 4, 8...
+    /// The rest, 4, 8 and 12 bytes past a boundary as in the user report
+    /// (FirstElement 42261210), are refused.
+    #[test]
+    fn raw_views_start_on_16_bytes() {
+        for first in [0, 4, 8, 42_261_208, 42_261_212] {
+            assert!(raw_start_fits(first), "{first}");
+        }
+        for first in [1, 2, 3, 5, 42_261_209, 42_261_210, 42_261_211] {
+            assert!(!raw_start_fits(first), "{first}");
+        }
+    }
+
+    /// The raw views the check lets through, at starts other than 0, are
+    /// made on the real device as SRVs and UAVs and leave it alive.
+    #[test]
+    fn raw_views_that_fit_are_accepted_by_the_device() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let properties = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            ..Default::default()
+        };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: 1024,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut buffer: Option<ID3D12Resource> = None;
+        // SAFETY: plain creation from valid descriptions.
+        unsafe {
+            host.device.CreateCommittedResource(
+                &properties,
+                D3D12_HEAP_FLAG_NONE,
+                &desc,
+                D3D12_RESOURCE_STATE_COMMON,
+                None,
+                &mut buffer,
+            )
+        }
+        .expect("buffer");
+        let buffer = buffer.expect("buffer");
+        for first in (0..64).filter(|&f| raw_start_fits(f)) {
+            let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_TYPELESS,
+                ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_SRV {
+                        FirstElement: first,
+                        NumElements: 16,
+                        Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                        ..Default::default()
+                    },
+                },
+            };
+            let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                Format: DXGI_FORMAT_R32_TYPELESS,
+                ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                    Buffer: D3D12_BUFFER_UAV {
+                        FirstElement: first,
+                        NumElements: 16,
+                        Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                        ..Default::default()
+                    },
+                },
+            };
+            // SAFETY: a live buffer and slots of our heap.
+            unsafe {
+                host.device
+                    .CreateShaderResourceView(&buffer, Some(&srv), heap.cpu(0));
+                host.device.CreateUnorderedAccessView(
+                    &buffer,
+                    None::<&ID3D12Resource>,
+                    Some(&uav),
+                    heap.cpu(1),
+                );
+            }
+        }
+        // SAFETY: a plain device query.
+        assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
+    }
+
+    /// Raw views placed 4 bytes past a 16-byte boundary of their host copy
+    /// make a null slot and leave the device alive; on the boundary they are
+    /// made as usual (SRVs and UAVs, through `make_at` as the title's are).
+    #[test]
+    fn raw_views_off_16_bytes_are_null() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        // A title buffer twice the placed resource's width, so views starting
+        // past the buffer's start still lie in it.
+        let (address, len) = (0x7e10_0000_0000_u64, 0x1000_u64);
+        crate::shadow::register(usize::MAX - 2, address, 2 * len);
+        let mut resource = [0u32; 14];
+        resource[0] = 1; // a buffer
+        resource[4] = len as u32;
+        let placed = |unordered: bool, at: u64| {
+            let mut desc = [0u32; 16];
+            desc[0] = DXGI_FORMAT_R32_TYPELESS.0 as u32;
+            desc[1] = 1; // buffer dimension
+            if unordered {
+                // NumElements, StructureByteStride, Flags
+                (desc[4], desc[5], desc[8]) = (16, 0, D3D12_BUFFER_UAV_FLAG_RAW.0 as u32);
+            } else {
+                desc[2] = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                (desc[6], desc[7], desc[8]) = (16, 0, D3D12_BUFFER_SRV_FLAG_RAW.0 as u32);
+            }
+            (desc[10], desc[11]) = (at as u32, (at >> 32) as u32);
+            View::Placed(unordered, resource, desc)
+        };
+        let kept = |index: u32| heap.kept.lock().unwrap()[index as usize].is_some();
+        for unordered in [false, true] {
+            heap.make_at(0, &placed(unordered, address + 16), None);
+            assert!(kept(0), "a raw view on 16 bytes (unordered: {unordered})");
+            heap.make_at(1, &placed(unordered, address + 4), None);
+            assert!(!kept(1), "a raw view 4 bytes off (unordered: {unordered})");
+            // SAFETY: a plain device query.
+            let removed = unsafe { host.device.GetDeviceRemovedReason() };
+            assert!(
+                removed.is_ok(),
+                "device removed: {removed:?} (unordered: {unordered})"
+            );
+        }
+        crate::shadow::unregister(usize::MAX - 2, address);
     }
 
     /// Dynamic slots stay taken until given back, and runs do not wrap.
