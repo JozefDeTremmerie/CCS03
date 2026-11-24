@@ -239,8 +239,19 @@ struct Lower<'a> {
 /// zeros) can make that four billion iterations, which hangs the host GPU
 /// until the driver resets it. A lane that reaches the limit leaves the
 /// program as killed (a pixel discards).
-// shortcut: a genuine loop of more iterations than this is cut short too.
-pub(super) const LOOP_LIMIT: u32 = 1 << 20;
+///
+/// 2^14 (16,384) because the host's GPU watchdog (TDR) removes the device
+/// once a submission runs for about 2 s. With 2^20, world runs on an
+/// RTX 5070 had submissions of up to 10.6 s (24-457 ms of GPU time per
+/// frame), and the device was removed, twice taking the desktop down with
+/// it; with 2^16 the longest was 1.1 s; with 2^14 the longest was 371 ms
+/// (42-50 ms per frame), with no device removal and the same frame rate.
+/// Those submissions were not spin waits (see `spin.rs`): only this
+/// general limit shortens them.
+// shortcut: a legitimate loop of more than 16,384 iterations per lane is
+// cut short, so its result is wrong there; raising
+// `VICTORY_SHADER_LOOP_LIMIT` shows whether a wrong result comes from it.
+pub(super) const LOOP_LIMIT: u32 = 1 << 14;
 
 /// Lane masks read as numbers (`s_bcnt1`, `s_ff1`, `v_mbcnt`, scalar
 /// compares, bit tests) are ballots of the lanes' booleans, taken where the

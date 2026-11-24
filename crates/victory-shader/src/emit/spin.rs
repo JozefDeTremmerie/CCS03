@@ -7,8 +7,9 @@
 //! writer's view can be another host resource than the reader's, null
 //! (reads zeros) or not mirrored yet, and the host compiler may hoist a
 //! load out of a loop that writes nothing. Such a loop then runs to the
-//! iteration limit in every lane, 2^20 uncached reads: about a second per
-//! wave. These loops get a much smaller limit ([`super::spin_limit`]).
+//! iteration limit in every lane: with the old limit of 2^20 uncached
+//! reads, about a second per wave; with 2^14, still tens of milliseconds.
+//! These loops get a smaller limit ([`super::spin_limit`]).
 //!
 //! A loop counts as one only when nothing in it can have an effect the
 //! limit would cut short: no stores, exports, LDS writes, barriers or

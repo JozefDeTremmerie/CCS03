@@ -100,7 +100,8 @@ use crate::{ShaderError, io, ir, resource, structure};
 pub use sampler::StaticSampler;
 pub use shader::{ROOT_CBV_SPACE, SAMPLER_SPACE, USER_DATA_SPACE};
 
-/// The loop limit without an override: 2^20.
+/// The loop limit without an override: 2^14 (16,384), under the host's
+/// GPU watchdog (see `lower::LOOP_LIMIT`).
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
 /// The iteration count after which a translated loop is left, per lane and
@@ -108,11 +109,15 @@ pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 ///
 /// `VICTORY_SHADER_LOOP_LIMIT` (decimal or `0x` hex, at least 1) sets it
 /// instead, in every build: a release build can then show which loops
-/// make a frame slow without a diagnostics build. A loop that hits the limit in
-/// every lane of a full-screen pass still runs for seconds (2^20 times a
-/// 4K screen is about 10^13 iterations); a much lower limit shows whether
-/// such loops are what makes a frame slow. The value is part of the
-/// translation, so the shader cache must key on it (`victory-gpu`'s does).
+/// make a frame slow without a diagnostics build. A loop that hits the
+/// limit in every lane of a full-screen pass still costs (2^14 times a 4K
+/// screen is about 10^11 iterations); a lower value shows whether such
+/// loops are what makes a frame slow. The default cuts short a legitimate
+/// loop of more than 16,384 iterations per lane, which then gives a wrong
+/// result; a higher value (the old default was `0x100000`) shows whether a
+/// wrong result comes from that, at the risk of the watchdog removing the
+/// device. The value is part of the translation, so the shader cache must
+/// key on it (`victory-gpu`'s does).
 pub fn loop_limit() -> u32 {
     static LIMIT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -129,9 +134,10 @@ pub const DEFAULT_SPIN_LIMIT: u32 = 1 << 12;
 /// more than [`loop_limit`]. On the console the write such a loop waits
 /// for comes within microseconds; on the host, when it never comes (the
 /// writer's view is another host resource, null, or the load was hoisted),
-/// 2^20 uncached reads per lane cost about a second per wave, which is
-/// what world frames spent per host submission. 4096 reads are a few
-/// milliseconds. Part of the translation: the shader cache keys on it.
+/// 2^20 uncached reads per lane (the old general limit) cost about a
+/// second per wave, which is what world frames spent per host submission;
+/// 4096 reads are a few milliseconds, a quarter of the general limit's
+/// 2^14. Part of the translation: the shader cache keys on it.
 pub fn spin_limit() -> u32 {
     static LIMIT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
@@ -434,6 +440,7 @@ mod tests {
 
     #[test]
     fn the_loop_limit_switch_parses_or_falls_back() {
+        assert_eq!(LOOP_LIMIT, 16_384);
         assert_eq!(parse_loop_limit(None), LOOP_LIMIT);
         assert_eq!(parse_loop_limit(Some("4096")), 4096);
         assert_eq!(parse_loop_limit(Some(" 0x1000 ")), 4096);
@@ -449,6 +456,8 @@ mod tests {
         assert_eq!(parse_limit(None, DEFAULT_SPIN_LIMIT), 4096);
         assert_eq!(parse_limit(Some("0x40"), DEFAULT_SPIN_LIMIT), 64);
         assert_eq!(parse_limit(Some("0"), DEFAULT_SPIN_LIMIT), 4096);
+        // Spin waits never get more than the general limit.
+        assert!(DEFAULT_SPIN_LIMIT <= LOOP_LIMIT);
     }
     use super::container::SigElement;
     use super::shader::Shader;
