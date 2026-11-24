@@ -24,6 +24,7 @@ Windows with an NVIDIA GPU (32-lane waves).
 | CCS03 PR 8: `v_cvt_f32_f64` | 9hvn9yt2vk-netizen |
 | CCS03 PR 9: `v_fma_mixlo/mixhi` over an f16 first interpolation half keeps zero (victory-fork PR 77) | m335671 |
 | CCS03 PR 10: a 1080p display is reported by default, so the title's targets fit an 8 GB card (`VICTORY_DISPLAY_MODE=3840x2160` for 4K) | 9hvn9yt2vk-netizen |
+| CCS03 PR 11: the depth bounds test is passed through to host pipelines and command lists (victory-fork PR 82) | Kaivyyy |
 | CCS03 PR 12: texture reads wait only for remappings of their own bytes (victory-fork PR 95) | LastThylacine |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
@@ -69,13 +70,13 @@ it: `gpu/win10-agility-sdk` (Windows 10 through the Agility SDK, VIctory PR
 968), `shader/mad-ldexp-frexp`, `shaders/ds-bpermute-b32`,
 `shaders/ds-inc-dec-rsub-u32`.
 
-## Open in CCS03
+## Closed in CCS03
 
-| PR | Status |
+| PR | Why |
 |---|---|
-| CCS03 PR 5 (VIctory PR 573, `ds_bpermute_b32`) | victory-fork already lowers `ds_bpermute_b32`; to be closed unless it fixes something the base gets wrong |
-| CCS03 PR 6 (`ds_rsub_u32`, `ds_inc_u32`, `ds_dec_u32`) | made on the previous base; needs a rebase on `ccs03` (the lowering applies, the tests conflict) |
-| CCS03 PR 11 (depth bounds test, victory-fork PR 82) | waits for a test run: a reviewer of victory-fork PR 82 saw an access violation in the `victory-gpu` tests when run in parallel |
+| CCS03 PR 5 (VIctory PR 573, `ds_bpermute_b32`) | victory-fork already lowers `ds_bpermute_b32`. Kept as tag `archief/pr-5` |
+| CCS03 PR 6 (`ds_rsub_u32`, `ds_inc_u32`, `ds_dec_u32`) | made on the previous base; welcome again rebased on `ccs03` (the lowering applies, the tests conflict). Kept as tag `archief/pr-6` |
+| CCS03 PR 7 (Agility SDK) | merged as the same change rebased on victory-fork. Kept as tag `archief/pr-7` |
 
 ## Not taken (yet)
 
