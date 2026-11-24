@@ -34,6 +34,7 @@ Credit goes to their authors (names as in their commits).
 | 452 | Loops that only wait for memory stop after 4096 iterations; the loop limit works in release builds | AntoninMichelq |
 | 284 | RDNA2's legacy multiply-adds are the fused ones | Dufftwt |
 | 298 | Lane masks spilled to VGPR lanes and read back | permadiego |
+| 573 | `ds_bpermute_b32` lowered without LDS (wave32 and 32-lane halves in wave64) | QB |
 
 ## From CCS03 contributors
 
@@ -53,6 +54,8 @@ Small changes needed to make the pull requests above build together:
   that PR 568 added to `HostHeap::make_at`.
 - The valu_tests compute builder is split in two, so PR 606's tests (whole
   programs) and PR 628's (a body wrapped by the builder) both fit.
+- `run_wave_cs` (from PR 573) passes `lowered.table_views` to `HostShader`,
+  which PR 568 added.
 
 - `README.md` is CCS03's own and links to upstream's README for the
   technical details. When merging upstream `main`, keep ours
@@ -79,7 +82,7 @@ And one correction to a pull request:
 | 599 | Large conflicts in the shader lowering; helps hosts with 64-lane waves only |
 | 632 | 571 covers the same LDS accesses |
 | 579 | A manual wave64 switch; PR 578 already refuses those programs on 32-lane hosts |
-| 192, 242, 294, 32, 573 | Conflicts with what is already in CCS03; to be looked at again |
+| 192, 242, 294, 32 | Conflicts with what is already in CCS03; to be looked at again |
 
 These are looked at again whenever upstream moves.
 
