@@ -47,9 +47,15 @@ the history.
 
 ## Rules
 
+The full list, for people and AI agents alike, is in
+[AGENTS.md](AGENTS.md). In short:
+
 - Nothing from the game in the repository, ever (see
   [docs/asset-policy.md](docs/asset-policy.md)); the hook checks every
   commit.
 - Commit messages: `Area: what changes`, as upstream does
   (`Shaders: ...`, `GPU: ...`, `HLE: ...`, `CCS03: ...` for fork-only work).
 - Code and comments in English.
+- Keep `LICENSE` and all copyright notices; everything stays GPL-3.0-or-later.
+- No code with an incompatible licence (XCL is GPL-2.0-only), no tools or keys
+  to break the game's protection, no Rockstar or GTA artwork.
