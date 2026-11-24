@@ -35,6 +35,13 @@ Credit goes to their authors (names as in their commits).
 | 284 | RDNA2's legacy multiply-adds are the fused ones | Dufftwt |
 | 298 | Lane masks spilled to VGPR lanes and read back | permadiego |
 
+## From CCS03 contributors
+
+| PR | What it does | Author |
+|---|---|---|
+| CCS03 PR 1 | `v_ldexp_f32`, `v_frexp_mant_f32` and `v_frexp_exp_i32_f32` | 9hvn9yt2vk-netizen |
+| CCS03 PR 2 | Raw buffer views that do not start on 16 bytes become null views instead of removing the device (also upstream PR 123) | 9hvn9yt2vk-netizen |
+
 ## Changes of CCS03's own
 
 Small changes needed to make the pull requests above build together:
