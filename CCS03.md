@@ -18,6 +18,7 @@ Windows with an NVIDIA GPU (32-lane waves).
 
 | What | Author |
 |---|---|
+| victory-fork PR 932: find free dynamic descriptor runs that cross the search cursor | avt0m4t48 |
 | `cargo xtask` finds the repository at run time, so the commit hook keeps working when the repository moves to another drive (CCS03 PR 3) | Apenshot123 |
 | Contributor guide, agent rules, Windows setup and test scripts (`AGENTS.md`, `CONTRIBUTING.md`, `ccs03/`) | CCS03 |
 | CCS03 PR 7: the DirectX 12 Agility SDK on Windows 10 (VIctory PR 968, without its packed-format mapping, which victory-fork already has) | bailu12300, Leekingut |

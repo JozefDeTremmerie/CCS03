@@ -4079,6 +4079,22 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
         assert_eq!(heap.dynamic(4), Some(first + 10));
         eprintln!("allocated the free run across the cursor");
     }
+
+    #[test]
+    fn dynamic_run_search_matches_all_small_heaps() {
+        const SIZE: usize = 8;
+        for mask in 0u16..(1 << SIZE) {
+            let taken: Vec<bool> = (0..SIZE).map(|i| mask & (1 << i) != 0).collect();
+            for cursor in 0..SIZE {
+                for n in 1..=SIZE {
+                    let expected = (cursor..SIZE).chain(0..cursor).find(|&start| {
+                        taken.get(start..start + n).is_some_and(|slots| slots.iter().all(|&used| !used))
+                    });
+                    assert_eq!(find_dynamic_run(&taken, cursor, n), expected, "mask {mask}, cursor {cursor}, n {n}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
