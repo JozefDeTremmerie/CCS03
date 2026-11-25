@@ -11,6 +11,11 @@
 #             textures come in over more frames)
 #   -Fast     refreshes of host copies on several threads (VICTORY_WIDE_REFRESH=1)
 #   -Low      a 1280x720 display
+#   -Steady   a frame counts at most 33 ms for the title (VICTORY_GAME_STEP_MS):
+#             at 3-4 fps the game runs slower than real time instead of in
+#             250-300 ms jumps, so boats, cars and the people in them keep to
+#             the steps the game was made for and steering keeps up.
+#             -Step <ms> sets another step.
 #   -Diag     the diagnostics build (cargo build --profile diag -p victory
 #             --features diagnostics), which logs why draws are dropped
 #   -Console series-x   the Series X profile (needs more than 8 GB)
@@ -28,6 +33,8 @@ param(
     [switch]$Smooth,
     [switch]$Fast,
     [switch]$Low,
+    [switch]$Steady,
+    [double]$Step = 33,
     [ValidateSet('series-s', 'series-x')][string]$Console = 'series-s'
 )
 $repo = Split-Path -Parent $PSScriptRoot
@@ -72,6 +79,7 @@ $env:VICTORY_CARD_REHASH_RUNS = '1'
 $env:NO_COLOR = '1'
 if ($Fast) { $env:VICTORY_WIDE_REFRESH = '1' }
 if ($Low) { $env:VICTORY_DISPLAY_MODE = '1280x720' }
+if ($Steady) { $env:VICTORY_GAME_STEP_MS = "$Step" }
 if ($Smooth) {
     $env:VICTORY_TEXTURE_STAGE_MS = '25'
     $env:VICTORY_TEXTURE_STAGE_MB = '48'
@@ -95,7 +103,7 @@ $ended = Get-Date
 
 $lines = Get-Content $log
 $out = New-Object System.Collections.Generic.List[string]
-$out.Add("Run $stamp, console $Console, smooth $Smooth, fast $Fast, low $Low, $([int]($ended - $started).TotalSeconds) s, exit code $($p.ExitCode)")
+$out.Add("Run $stamp, console $Console, smooth $Smooth, fast $Fast, low $Low, steady $Steady ($Step ms), $([int]($ended - $started).TotalSeconds) s, exit code $($p.ExitCode)")
 $out.Add('')
 $out.Add('== Frame rate (one line every ~5 s) ==')
 $lines | Where-Object { $_ -match 'fps, [0-9.]+ ms/frame' } | ForEach-Object {

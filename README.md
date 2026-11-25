@@ -220,6 +220,17 @@ textures come in over more frames), `-Fast` refreshes host copies on
 several threads, `-Low` uses a 1280x720 display and `-Diag` runs the
 diagnostics build, which logs why draws are dropped.
 
+`-Steady` (`VICTORY_GAME_STEP_MS=33`) holds each frame to 33 ms for the
+title: at 3-4 fps the game runs slower than real time instead of moving
+the world in 250-300 ms jumps. The title times its frames with
+`QueryPerformanceCounter`, and the counter it reads then runs slower while
+frames are slow, continuous and never backwards. Boats and cars at speed
+then no longer pass through a shore between two frames or throw the people
+on them off, and a frame of steering is 33 ms of steering. The log says
+every five seconds how fast the game runs against real time. Cutscenes and
+their sound may drift apart with it on; it is meant for driving and
+sailing.
+
 A shader and pipeline cache per PC (`VICTORY_CACHE_DIR`) keeps two
 machines with different cards from rebuilding each other's pipelines.
 Without the Series S profile, an 8 GB card runs out of memory in the world

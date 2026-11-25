@@ -45,6 +45,7 @@ Windows with an NVIDIA GPU (32-lane waves).
 | Failing shaders logged with the title's name for their program | 9hvn9yt2vk-netizen |
 | The Series S profile's water transmission programs on victory-fork's wave-wide list (they did not translate for 32-lane waves) | 9hvn9yt2vk-netizen |
 | `ccs03\play.ps1`: runs with the README's switches, keeps a log and a summary per run (`-Smooth`, `-Fast`, `-Low`, `-Diag`) | 9hvn9yt2vk-netizen |
+| The title's frames held to a steady step at low frame rates (`VICTORY_GAME_STEP_MS`, `play.ps1 -Steady`): its performance counter runs slower while frames are slow | 9hvn9yt2vk-netizen |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
 of the title and the technical details. When merging victory-fork `main`,
