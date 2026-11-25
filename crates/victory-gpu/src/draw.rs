@@ -3607,6 +3607,14 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            // The title runs its reflections' history pass indirectly too.
+            if self.reflections(list, p) {
+                // Our pass set its own heap, root signature and pipeline:
+                // the next draw or dispatch sets the title's again.
+                self.host_pipeline = 0;
+                self.host_roots = [0; 2];
+                self.host_heaps = [0; 2];
+            }
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
