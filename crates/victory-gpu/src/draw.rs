@@ -2306,7 +2306,9 @@ impl State {
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
-        if self.ambient(list, p) {
+        let ambient = self.ambient(list, p);
+        let reflections = self.reflections(list, p);
+        if ambient || reflections {
             // Our pass set its own heap, root signature and pipeline: the
             // next draw or dispatch sets the title's again (as `replay`).
             self.host_pipeline = 0;
@@ -2366,6 +2368,29 @@ impl State {
             _ => None,
         };
         crate::ambient::raise(list, light as This, depth)
+    }
+
+    /// After a dispatch of `p`: its reflections bent down to the light
+    /// around them, if it is the pass that keeps them ([`crate::reflect`]).
+    fn reflections(&self, list: &HostList, p: &crate::pipeline::host::HostPipeline) -> bool {
+        let Some(stage) = p.stages.first().filter(|s| s.shader.updates_reflections) else {
+            return false;
+        };
+        let (slot, offset) = crate::reflect::IMAGE;
+        let Some(u) = stage.translated().used.iter().find(|u| {
+            u.kind == ResourceType::Uav
+                && u.root == RootType::Table
+                && (u.slot, u.table_offset_dwords) == (slot, offset)
+        }) else {
+            return false;
+        };
+        let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(u.slot)) else {
+            return false;
+        };
+        match crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4) {
+            Some(View::Unordered(r, ..)) if r != 0 => crate::reflect::bend(list, r as This),
+            _ => false,
+        }
     }
 
     /// What a draw or dispatch runs, for the device-removed report

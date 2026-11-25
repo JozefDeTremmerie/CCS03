@@ -64,6 +64,10 @@ pub(crate) struct Shader {
     /// Its result gets the least indirect light ([`crate::ambient`]).
     #[cfg(windows)]
     pub(crate) resolves_light: bool,
+    /// Its reflections are bent down to the light around them
+    /// ([`crate::reflect`]).
+    #[cfg(windows)]
+    pub(crate) updates_reflections: bool,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
     /// Whether its code walks the ray-tracing structures, once looked at
@@ -122,6 +126,10 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 resolves_light: bytes
                     .windows(crate::ambient::PROGRAM.len())
                     .any(|w| w == crate::ambient::PROGRAM),
+                #[cfg(windows)]
+                updates_reflections: bytes
+                    .windows(crate::reflect::PROGRAM.len())
+                    .any(|w| w == crate::reflect::PROGRAM),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
                 #[cfg(windows)]
