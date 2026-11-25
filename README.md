@@ -26,6 +26,10 @@ title you need your own copy.
   high-performance GPU of a laptop is used, and the title's missing
   ray-traced light is stood in for by a constant.
 - Windows 10 through the DirectX 12 Agility SDK (see below).
+- PlayStation 5 pads (DualSense, DualSense Edge) over USB or Bluetooth,
+  with no helper program: while XInput has no pad in its first slot, the
+  PS5 pad plays as that pad (cross A, circle B, square X, triangle Y,
+  Options Menu, Create or a touchpad click View; rumble over USB).
 - Tooling for contributors. One script sets up a clone and one runs the
   tests and Clippy as the CI does. A commit hook keeps game data out of the
   history, and [AGENTS.md](AGENTS.md) gives people and AI agents the same
