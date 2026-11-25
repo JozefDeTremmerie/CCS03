@@ -7,7 +7,7 @@ amount of rendering, lighting, frame-rate and memory work on top of VIctory,
 so CCS03 starts from there and adds its own work and reviewed pull requests
 on top.
 
-Base: victory-fork `main` at `4e17478` (on VIctory `main` at `ffe310e`).
+Base: victory-fork `main` at `4e17478` (on VIctory `main` at `ffe310e`); victory-fork's later commits on `main` change nothing (a change taken out and put back).
 
 Every change that comes into `ccs03` is checked first: is it already in the
 base, does victory-fork already solve the same problem another way, do
@@ -26,6 +26,9 @@ Windows with an NVIDIA GPU (32-lane waves).
 | CCS03 PR 10: a 1080p display is reported by default, so the title's targets fit an 8 GB card (`VICTORY_DISPLAY_MODE=3840x2160` for 4K) | 9hvn9yt2vk-netizen |
 | CCS03 PR 11: the depth bounds test is passed through to host pipelines and command lists (victory-fork PR 82) | Kaivyyy |
 | CCS03 PR 12: texture reads wait only for remappings of their own bytes (victory-fork PR 95) | LastThylacine |
+| CCS03 PR 13: no blending on integer render targets (the driver refused a mesh pipeline over it) | 9hvn9yt2vk-netizen |
+| CCS03 PR 14: the capture folder is made before frames are saved | 9hvn9yt2vk-netizen |
+| CCS03 PR 15: `v_ldexp_f32`, `v_frexp_mant_f32` and `v_frexp_exp_i32_f32` (CCS03 PR 1 of the previous base, again) | 9hvn9yt2vk-netizen |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
 of the title and the technical details. When merging victory-fork `main`,
@@ -46,7 +49,6 @@ covers it. "Applies" says how its change lands on the new base.
 | VIctory PR 596: `v_cvt_pknorm_*` with exact rounding | mercuryVM | cleanly |
 | HLE: file path in DirectStorage request failure warnings | Apenshot123 | cleanly |
 | HLE: `source_path` guarded against unsupported DirectStorage options | Apenshot123 | small conflict |
-| CCS03 PR 1: `v_ldexp_f32`, `v_frexp_mant_f32`, `v_frexp_exp_i32_f32` | 9hvn9yt2vk-netizen | small conflict |
 | CCS03 PR 2: raw buffer views that do not start on 16 bytes become null views (also VIctory PR 123) | 9hvn9yt2vk-netizen | small conflict |
 | VIctory PR 605: `v_cvt_rpi_i32_f32` rounds the exact sum; NaN saturates by its sign | upipibi | small conflict |
 | VIctory PR 707: `tbuffer_store_format_*` that need no conversion | mercuryVM | small conflict |
