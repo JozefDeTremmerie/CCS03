@@ -129,7 +129,9 @@ pub(super) mod reader {
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
     };
 
-    use super::{Link, PRODUCTS, PadState, VENDOR, parse, rumble_report};
+    use super::{
+        LEFT_SHOULDER, Link, PRODUCTS, PadState, RIGHT_SHOULDER, VENDOR, parse, rumble_report,
+    };
 
     /// Looking for a pad again this often while none is there.
     const LOOK_AGAIN: Duration = Duration::from_secs(1);
@@ -177,7 +179,12 @@ pub(super) mod reader {
 
         /// Sets the motors, if a pad on USB is there.
         pub(in super::super) fn rumble(&self, low: u16, high: u16) {
-            let out = self.shared.lock().unwrap_or_else(|e| e.into_inner()).out.clone();
+            let out = self
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .out
+                .clone();
             let Some((handle, len)) = out else { return };
             let report = rumble_report(len, low, high);
             let mut written = 0;
@@ -202,8 +209,8 @@ pub(super) mod reader {
                 std::thread::sleep(LOOK_AGAIN);
                 continue;
             };
-            let Some((handle, input, output)) = open(&path, GENERIC_READ | GENERIC_WRITE)
-                .or_else(|| open(&path, GENERIC_READ))
+            let Some((handle, input, output)) =
+                open(&path, GENERIC_READ | GENERIC_WRITE).or_else(|| open(&path, GENERIC_READ))
             else {
                 std::thread::sleep(LOOK_AGAIN);
                 continue;
@@ -211,9 +218,16 @@ pub(super) mod reader {
             let handle = Arc::new(handle);
             // A pad on USB sends 64-byte reports; over Bluetooth the device
             // reports the length of its longest (78).
-            let link = if input <= 64 { Link::Usb } else { Link::Bluetooth };
+            let link = if input <= 64 {
+                Link::Usb
+            } else {
+                Link::Bluetooth
+            };
             if !said {
-                tracing::info!(?link, "a PlayStation 5 pad plays as the first pad while XInput has none");
+                tracing::info!(
+                    ?link,
+                    "a PlayStation 5 pad plays as the first pad while XInput has none"
+                );
                 said = true;
             }
             {
@@ -221,6 +235,7 @@ pub(super) mod reader {
                 s.out = (link == Link::Usb && output > 0).then(|| (handle.clone(), output));
             }
             let mut buffer = vec![0u8; input.max(64)];
+            let (mut last, mut told) = ([false; 4], [0u8; 4]);
             loop {
                 let mut read = 0;
                 // SAFETY: an open handle and our own buffer; a blocking read
@@ -238,6 +253,28 @@ pub(super) mod reader {
                     break;
                 }
                 if let Some(pad) = parse(link, &buffer[..read as usize]) {
+                    // The first presses of the triggers and shoulders, with
+                    // the report's first bytes, so that a pad whose
+                    // reports differ can be told apart in a log.
+                    let held = [
+                        pad.left_trigger > 0.5,
+                        pad.right_trigger > 0.5,
+                        pad.buttons & LEFT_SHOULDER != 0,
+                        pad.buttons & RIGHT_SHOULDER != 0,
+                    ];
+                    for (i, (&now, was)) in held.iter().zip(&mut last).enumerate() {
+                        if now && !*was && told[i] < 3 {
+                            told[i] += 1;
+                            tracing::info!(
+                                what = ["LT", "RT", "LB", "RB"][i],
+                                left_trigger = pad.left_trigger,
+                                right_trigger = pad.right_trigger,
+                                bytes = ?&buffer[..read.min(12) as usize],
+                                "PlayStation 5 pad: pressed"
+                            );
+                        }
+                        *was = now;
+                    }
                     shared.lock().unwrap_or_else(|e| e.into_inner()).pad = Some(pad);
                 }
             }
@@ -313,8 +350,9 @@ pub(super) mod reader {
                 ..Default::default()
             };
             // SAFETY: the set from above; room for the interface data.
-            if unsafe { SetupDiEnumDeviceInterfaces(set, std::ptr::null(), &hid, index, &mut interface) }
-                == 0
+            if unsafe {
+                SetupDiEnumDeviceInterfaces(set, std::ptr::null(), &hid, index, &mut interface)
+            } == 0
             {
                 break;
             }
@@ -335,7 +373,9 @@ pub(super) mod reader {
             }
             // 8-byte aligned room for the detail, path included.
             let mut room = vec![0u64; (needed as usize).div_ceil(8)];
-            let detail = room.as_mut_ptr().cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
+            let detail = room
+                .as_mut_ptr()
+                .cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
             // SAFETY: `room` holds at least the fixed part.
             unsafe { (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32 };
             // SAFETY: `needed` bytes of room, as asked.
@@ -417,7 +457,10 @@ mod tests {
     fn a_resting_pad_reads_as_nothing_pressed() {
         let pad = parse(Link::Usb, &usb()).unwrap();
         assert_eq!(pad.buttons, 0);
-        assert_eq!((pad.left_x, pad.left_y, pad.right_x, pad.right_y), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(
+            (pad.left_x, pad.left_y, pad.right_x, pad.right_y),
+            (0.0, 0.0, 0.0, 0.0)
+        );
         assert_eq!((pad.left_trigger, pad.right_trigger), (0.0, 0.0));
     }
 
@@ -428,7 +471,10 @@ mod tests {
         r[9] = 0x01 | 0x20 | 0x40; // L1, Options, L3
         r[10] = 0x02; // touchpad click
         let pad = parse(Link::Usb, &r).unwrap();
-        assert_eq!(pad.buttons, A | Y | RIGHT | LEFT_SHOULDER | MENU | LEFT_STICK | VIEW);
+        assert_eq!(
+            pad.buttons,
+            A | Y | RIGHT | LEFT_SHOULDER | MENU | LEFT_STICK | VIEW
+        );
     }
 
     #[test]
