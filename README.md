@@ -33,8 +33,40 @@ title you need your own copy.
 
 ## Status
 
-CCS03 follows victory-fork `main` (base `0b0074e`, the frame-rate work of 25
-November). What follows is what CCS03 itself has seen.
+CCS03 follows victory-fork `main` (base `d510ee4`, 25 November). What
+follows is what CCS03 itself has seen.
+
+### Test runs of 2026-11-25, evening: in control of the character
+
+Build: `ccs03` with victory-fork `d510ee4` merged, release and diagnostics
+builds, `--console series-s` (and once `series-x`), a 1080p display, the
+switches under "Running" below.
+
+Machine: the same laptop, GeForce RTX 4060 Laptop GPU (8 GB), Ryzen 9
+7845HX. Game files: `game_scarlett_master.exe` and its packages, dumped
+from our own console.
+
+**Playable at a low frame rate: the player walks the character around the
+prison yard with a pad or the keyboard, at 5.5 to 7.6 frames a second.**
+
+| Stage | What we saw |
+|-------|-------------|
+| Boot, menus, start screen | 30 fps |
+| Opening cutscene (the diner) | plays with sound; characters, faces, hair and the room drawn and lit; 1 to 3 fps. The first seconds of a shot are washed out, nearly white, while its textures stream onto the 8 GB card (up to 1.7 GB in five seconds), then the picture settles |
+| Prologue, prison | the game hands control over ("Move around / Move the camera"); the player walks the character and turns the camera in the yard; 5.5 to 7.6 fps, 130 to 190 ms a frame, about 3,400 to 4,600 draws |
+| Stability | four runs of 2.5 to 11 minutes on this build, each closed by us: no crash, out-of-memory or device removal |
+| Draws left out | almost all are the stages of the ray-tracing structure builder, which is off (700 to 3,200 a frame in cutscenes); besides those, 3 compute programs: 1 that does not translate, 2 the driver refuses |
+
+Seen and still open in the picture:
+
+- Series S: white speckles on skin in close-ups; the same shot with
+  `--console series-x` is clean, so it comes from the Series S path.
+- The yard in sunlight is washed out: the constant that stands in for the
+  ray-traced indirect light adds to reflections of the open sky.
+- Some tattooed arms are drawn black with blue lines.
+- At startup the title asks two console device methods (`0x1c8`, about
+  16,000 calls, and `0x218`, about 2,000) for pipelines; neither is
+  written yet anywhere, so the title goes without those pipelines.
 
 ### Test run of 2026-11-25, afternoon: Series S on an 8 GB laptop
 
@@ -102,6 +134,7 @@ VICTORY_RELAY=2 VICTORY_ASYNC_SUBMIT=1 VICTORY_QUEUE2=1 VICTORY_INDIRECT_WINDOW=
 VICTORY_COPY_PLAIN=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_WIDE_TEXTURES=1
 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_TEXTURE_ROOM_PERCENT=86
 VICTORY_CARD_ROOM_FOR_TARGETS_MB=1024 VICTORY_CARD_BUFFERS_MB=768 VICTORY_AMBIENT=0.9
+VICTORY_JOIN_PARTS=1 VICTORY_BACK_OWN_VIEW=1 VICTORY_INDIRECT_GATHER=1 VICTORY_CARD_REHASH_RUNS=1
 victory.exe run <game folder>\game_scarlett_master.exe --execute --console series-s
 ```
 
