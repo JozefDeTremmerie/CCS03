@@ -80,6 +80,8 @@ mod shadow;
 mod tiles;
 pub mod signature;
 #[cfg(windows)]
+mod texheap;
+#[cfg(windows)]
 mod texture;
 #[cfg(windows)]
 mod watch;

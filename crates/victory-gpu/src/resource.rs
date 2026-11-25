@@ -1842,6 +1842,26 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
     }
 }
 
+/// How long a host copy of a texture the title fills must go unused before
+/// [`let_go_idle`] lets it go: `crate::host::vram_idle_ms` four times over
+/// while the card is below 85 % of its budget (20 s below 75 %, 10 s up to
+/// 85 %), as it is from 85 % on (1 s). `VICTORY_TEXTURE_KEEP=0`: as
+/// `vram_idle_ms` alone, as before.
+///
+/// Why: a cutscene cuts between shots. At one frame a second in the
+/// opening cutscene's first minutes, a shot's textures unused for 2.5 to
+/// 5 s were let go and made and uploaded again when the camera came back:
+/// 35,000 let go and 7,700 made again in its first two minutes on the
+/// 8 GB laptop (25 November), with the card at 75 % of its budget. Under
+/// pressure they still go at once.
+#[cfg(windows)]
+fn texture_idle_ms(video_memory: Option<[u64; 4]>) -> u64 {
+    static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let base = crate::host::vram_idle_ms(video_memory);
+    let keep = *KEEP.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_KEEP").is_none_or(|v| v != "0"));
+    if keep && base > 1_000 { base * 4 } else { base }
+}
+
 /// Lets go of the host copies of textures the title fills that nothing
 /// names any more: placed textures were never released (one host texture
 /// per address and description ever viewed: 18,639 of them, 2.5 GB, after
@@ -1873,7 +1893,7 @@ pub(crate) fn let_go_idle() {
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
     }
-    let idle_ms = crate::host::vram_idle_ms(crate::host::host().and_then(|h| h.video_memory()));
+    let idle_ms = texture_idle_ms(crate::host::host().and_then(|h| h.video_memory()));
     // For the trail (`crate::host::trail`): how many went, their bytes,
     // and the first one.
     let (mut went, mut bytes, mut first) = (0u64, 0u64, None);
@@ -2094,6 +2114,7 @@ impl HostTexture {
 impl Drop for HostTexture {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
+        crate::texheap::release(&self.texture);
         HOST_TEXTURES[0].fetch_sub(1, Relaxed);
         HOST_TEXTURES[1].fetch_sub(self.bytes, Relaxed);
         if self.filled {
@@ -2293,7 +2314,21 @@ fn host_texture_as(
                 )
             }
         };
-        if quiet {
+        // In a shared heap if it fits one (`crate::texheap`).
+        let placed = (quiet && clear_value.is_none())
+            .then(|| {
+                crate::texheap::place(
+                    &host.device,
+                    // SAFETY: `d` is a resource description in the host's layout.
+                    unsafe { &*(&raw const d).cast::<D3D12_RESOURCE_DESC>() },
+                    D3D12_RESOURCE_STATES(crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32),
+                )
+            })
+            .flatten();
+        if let Some(placed) = placed {
+            texture = Some(placed);
+            Ok(())
+        } else if quiet {
             match create(D3D12_HEAP_FLAG_CREATE_NOT_ZEROED, &mut texture) {
                 Ok(()) => {
                     if NOT_ZEROED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
