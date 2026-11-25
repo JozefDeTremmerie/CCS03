@@ -141,7 +141,182 @@ fn staging_buffer(host: &crate::host::Host, total: u64) -> Option<(ID3D12Resourc
         return Some((buffer, data as *mut u8, size));
     }
     SPARE_STATS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some((buffer, data, fresh)) = slab_buffer(host, size) {
+        if !fresh {
+            // SAFETY: the slot's own mapping, `size` bytes, which nothing
+            // else holds.
+            unsafe { std::ptr::write_bytes(data, 0, total as usize) };
+        }
+        return Some((buffer, data, size));
+    }
     host.upload_buffer(size).map(|(buffer, data)| (buffer, data, size))
+}
+
+/// Upload heaps that pooled staging buffers are placed in, a slot of one
+/// size each (`VICTORY_STAGING_SLABS=0`: each buffer made alone, as before).
+///
+/// Why: in the opening cutscene's first minutes (profile of 25 November,
+/// RTX 4060 laptop) a fifth to a quarter of the pass over the heap's
+/// texture slots was `CreateCommittedResource` of staging buffers, the
+/// graphics kernel making one allocation for every texture streamed in
+/// (`NtGdiDdDDICreateAllocation`): thousands a minute, more than the pool
+/// of spare buffers can answer while the textures grow. A buffer placed
+/// in a heap that is already there takes no allocation of the kernel's;
+/// a heap holds [`SLAB_BYTES`] of buffers of one size.
+struct Slab {
+    heap: ID3D12Heap,
+    size: u64,
+    /// Free slots, and whether a slot was used before (its bytes are then
+    /// not zeros).
+    free: Vec<(u32, bool)>,
+    used: u32,
+}
+
+// SAFETY: a D3D12 heap is free-threaded; the rest is plain data.
+unsafe impl Send for Slab {}
+
+/// The bytes of one slab heap.
+const SLAB_BYTES: u64 = 16 << 20;
+
+/// The slabs (a slab whose heap was let go is `None`), and the slot of each
+/// buffer placed in them, by the buffer's address.
+static SLABS: Mutex<(Vec<Option<Slab>>, Option<HashMap<usize, (usize, u32)>>)> = Mutex::new((Vec::new(), None));
+
+/// Slab heaps made, buffers placed in them, and slab heaps let go, since the start.
+pub(crate) static SLAB_STATS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+fn slabs_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_STAGING_SLABS").is_none_or(|v| v != "0"))
+}
+
+/// A mapped buffer of `size` bytes (a power of two, at most [`SLAB_BYTES`])
+/// placed in a slab heap, and whether its bytes are still all zeros.
+fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *mut u8, bool)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !slabs_on() || size > SLAB_BYTES || !size.is_power_of_two() {
+        return None;
+    }
+    let (index, slot, fresh, heap) = {
+        let mut all = SLABS.lock().unwrap_or_else(|e| e.into_inner());
+        let found = all.0.iter().position(|s| s.as_ref().is_some_and(|s| s.size == size && !s.free.is_empty()));
+        let index = match found {
+            Some(index) => index,
+            None => {
+                let desc = D3D12_HEAP_DESC {
+                    SizeInBytes: SLAB_BYTES,
+                    Properties: D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_UPLOAD,
+                        ..Default::default()
+                    },
+                    Alignment: 0,
+                    Flags: D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS,
+                };
+                let mut made: Option<ID3D12Heap> = None;
+                // SAFETY: plain creation; the out pointer is ours.
+                if let Err(e) = unsafe { host.device.CreateHeap::<ID3D12Heap>(&raw const desc, &raw mut made) } {
+                    once!(error = %e, "no upload heap for staging buffers: they are made one by one");
+                    return None;
+                }
+                SLAB_STATS[0].fetch_add(1, Relaxed);
+                let slots = (SLAB_BYTES / size) as u32;
+                let slab = Slab {
+                    heap: made?,
+                    size,
+                    free: (0..slots).rev().map(|i| (i, false)).collect(),
+                    used: 0,
+                };
+                match all.0.iter().position(Option::is_none) {
+                    Some(empty) => {
+                        all.0[empty] = Some(slab);
+                        empty
+                    }
+                    None => {
+                        all.0.push(Some(slab));
+                        all.0.len() - 1
+                    }
+                }
+            }
+        };
+        let slab = all.0[index].as_mut()?;
+        let (slot, used_before) = slab.free.pop()?;
+        slab.used += 1;
+        (index, slot, !used_before, slab.heap.clone())
+    };
+    let desc = D3D12_RESOURCE_DESC {
+        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+        Width: size,
+        Height: 1,
+        DepthOrArraySize: 1,
+        MipLevels: 1,
+        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        ..Default::default()
+    };
+    let mut buffer: Option<ID3D12Resource> = None;
+    let mut data = std::ptr::null_mut();
+    // SAFETY: a buffer placed at its own slot of the heap, which nothing
+    // else uses; mapped for writing only.
+    let made = unsafe {
+        host.device
+            .CreatePlacedResource(&heap, u64::from(slot) * size, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None, &mut buffer)
+            .and_then(|()| {
+                let b = buffer.as_ref().ok_or_else(windows::core::Error::empty)?;
+                b.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut data))
+            })
+    };
+    let mut all = SLABS.lock().unwrap_or_else(|e| e.into_inner());
+    match (made, buffer) {
+        (Ok(()), Some(buffer)) if !data.is_null() => {
+            all.1.get_or_insert_with(HashMap::new).insert(windows::core::Interface::as_raw(&buffer) as usize, (index, slot));
+            SLAB_STATS[1].fetch_add(1, Relaxed);
+            Some((buffer, data.cast(), fresh))
+        }
+        (made, _) => {
+            once!(error = ?made.err(), "a staging buffer could not be placed in an upload heap; made alone");
+            if let Some(slab) = all.0[index].as_mut() {
+                slab.free.push((slot, !fresh));
+                slab.used -= 1;
+            }
+            None
+        }
+    }
+}
+
+/// `buffer` is let go: if it was placed in a slab, its slot is free again.
+/// A slab left with no buffer is let go at a later call (its last buffer
+/// is dropped after this returns), unless it is the only free room of its
+/// size.
+fn slab_release(buffer: &ID3D12Resource) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !slabs_on() {
+        return;
+    }
+    let mut all = SLABS.lock().unwrap_or_else(|e| e.into_inner());
+    let all = &mut *all;
+    // Empty slabs from earlier calls: their buffers are gone by now. One of
+    // each size is kept.
+    let mut kept_sizes: Vec<u64> = Vec::new();
+    for entry in &mut all.0 {
+        if let Some(slab) = entry
+            && slab.used == 0
+            && slab.free.iter().all(|&(_, before)| before)
+        {
+            if kept_sizes.contains(&slab.size) {
+                *entry = None;
+                SLAB_STATS[2].fetch_add(1, Relaxed);
+            } else {
+                kept_sizes.push(slab.size);
+            }
+        }
+    }
+    let Some((index, slot)) = all.1.as_mut().and_then(|m| m.remove(&(windows::core::Interface::as_raw(buffer) as usize))) else {
+        return;
+    };
+    if let Some(Some(slab)) = all.0.get_mut(index) {
+        slab.free.push((slot, true));
+        slab.used -= 1;
+    }
 }
 
 /// Whether staging buffers are taken from and returned to the spare ones
@@ -545,10 +720,17 @@ impl Drop for Staging {
         // Nothing holds the staging any more (lists keep it until they are
         // reset, after their submission has run): its buffer is spare.
         if self.pooled != 0 {
-            let mut all = SPARE.lock().unwrap_or_else(|e| e.into_inner());
-            if all.1 + self.pooled <= spare_most() {
-                all.1 += self.pooled;
-                all.0.entry(self.pooled).or_default().push(Spare(self.buffer.clone(), self.data as usize));
+            let kept = {
+                let mut all = SPARE.lock().unwrap_or_else(|e| e.into_inner());
+                let room = all.1 + self.pooled <= spare_most();
+                if room {
+                    all.1 += self.pooled;
+                    all.0.entry(self.pooled).or_default().push(Spare(self.buffer.clone(), self.data as usize));
+                }
+                room
+            };
+            if !kept {
+                slab_release(&self.buffer);
             }
         }
     }
@@ -1495,6 +1677,7 @@ fn mapped_blocks(start: usize, end: usize) -> u64 {
     // SAFETY: plain data.
     let mut info: [PSAPI_WORKING_SET_EX_INFORMATION; BATCH] = unsafe { std::mem::zeroed() };
     let mut spans = [(0usize, 0usize); BATCH];
+    let mut region = Region::default();
     while block < end {
         let mut n = 0usize;
         while n < BATCH && block < end {
@@ -1513,13 +1696,64 @@ fn mapped_blocks(start: usize, end: usize) -> u64 {
             // SAFETY: plain data the query filled in.
             let valid = asked && unsafe { info[i].VirtualAttributes.Flags } & 1 != 0;
             let (lo, hi) = spans[i];
+            let page = lo & !(KERNEL_PAGE - 1);
             let mut byte = [0u8];
-            if valid || crate::host::read_into((lo & !(KERNEL_PAGE - 1)) as *const u8, &mut byte) {
+            let there_now = valid
+                || if read_probe() {
+                    crate::host::read_into(page as *const u8, &mut byte)
+                } else {
+                    region.there(page)
+                };
+            if there_now {
                 there += (hi - lo) as u64;
             }
         }
     }
     there
+}
+
+/// Whether a block not in the working set is asked about by reading a byte
+/// of it through the kernel (`VICTORY_MAPPED_READ=1`, as before) rather
+/// than by the state of its region ([`Region`]).
+///
+/// Why: in the opening cutscene's first minutes (profile of 25 November)
+/// those reads were 14 to 17 % of the pass over the heap's texture slots:
+/// a texture just streamed in is mapped through views of the runtime's and
+/// none of its pages is in our working set yet, so every block of it was
+/// read, each read a fault. Asking for the region's state is one question
+/// that touches nothing, and answers for every block the region covers.
+fn read_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_MAPPED_READ").is_some_and(|v| v == "1"))
+}
+
+/// The last region of title memory asked about ([`mapped_blocks`]): from,
+/// to, and whether it can be read (committed, not guarded or no access).
+#[derive(Default)]
+struct Region(usize, usize, bool);
+
+impl Region {
+    fn there(&mut self, page: usize) -> bool {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+        };
+        if page >= self.0 && page < self.1 {
+            return self.2;
+        }
+        // SAFETY: plain data filled in by the query.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a valid out pointer of the right size.
+        let n = unsafe { VirtualQuery(page as *const _, &mut info, size_of_val(&info)) };
+        if n == 0 {
+            *self = Region::default();
+            return false;
+        }
+        let from = info.BaseAddress as usize;
+        let to = from.saturating_add(info.RegionSize);
+        let readable = info.State == MEM_COMMIT && info.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0;
+        *self = Region(from, to, readable);
+        readable
+    }
 }
 
 fn readable(at: usize, len: usize, all: bool) -> (usize, usize) {
