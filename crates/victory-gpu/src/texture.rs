@@ -170,6 +170,8 @@ struct Slab {
     /// not zeros).
     free: Vec<(u32, bool)>,
     used: u32,
+    /// The call ([`SLABS`]' count) at which it was left with no buffer.
+    empty_at: Option<u64>,
 }
 
 // SAFETY: a D3D12 heap is free-threaded; the rest is plain data.
@@ -189,7 +191,39 @@ fn slab_bytes(size: u64) -> u64 {
 
 /// The slabs (a slab whose heap was let go is `None`), and the slot of each
 /// buffer placed in them, by the buffer's address.
-static SLABS: Mutex<(Vec<Option<Slab>>, Option<HashMap<usize, (usize, u32)>>)> = Mutex::new((Vec::new(), None));
+/// And how many calls have taken the lock.
+static SLABS: Mutex<(Vec<Option<Slab>>, Option<HashMap<usize, (usize, u32)>>, u64)> = Mutex::new((Vec::new(), None, 0));
+
+/// Lets go of slab heaps left with no buffer at an earlier call (their last
+/// buffer is gone by now), keeping [`SLABS_EMPTY_KEPT`] of them.
+///
+/// A first version let a heap go only once every one of its slots had
+/// been used: a heap of 256 slots of which 40 ever held a buffer stayed
+/// for good, and the laptop run of 26 November held about 2.4 GB more of
+/// the PC's memory than before the slabs, with 200 to 350 MB left free.
+fn slabs_purge(slabs: &mut [Option<Slab>], calls: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut kept = 0;
+    for entry in slabs.iter_mut() {
+        if let Some(slab) = entry
+            && slab.used == 0
+            && slab.empty_at.is_some_and(|at| at < calls)
+        {
+            if kept >= SLABS_EMPTY_KEPT {
+                let gone = SLAB_STATS[2].fetch_add(1, Relaxed) + 1;
+                if gone.is_power_of_two() || gone.is_multiple_of(64) {
+                    tracing::info!(made = SLAB_STATS[0].load(Relaxed), let_go = gone, "staging slab heaps let go");
+                }
+                *entry = None;
+            } else {
+                kept += 1;
+            }
+        }
+    }
+}
+
+/// Empty slab heaps kept for buffers to come.
+const SLABS_EMPTY_KEPT: usize = 2;
 
 /// Slab heaps made, buffers placed in them, and slab heaps let go, since the start.
 pub(crate) static SLAB_STATS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
@@ -208,7 +242,18 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
     }
     let (index, slot, fresh, heap) = {
         let mut all = SLABS.lock().unwrap_or_else(|e| e.into_inner());
-        let found = all.0.iter().position(|s| s.as_ref().is_some_and(|s| s.size == size && !s.free.is_empty()));
+        all.2 += 1;
+        let calls = all.2;
+        slabs_purge(&mut all.0, calls);
+        // The fullest heap of the size with a free slot: the others empty
+        // and are let go.
+        let found = all
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().filter(|s| s.size == size && !s.free.is_empty()).map(|s| (i, s.used)))
+            .max_by_key(|&(_, used)| used)
+            .map(|(i, _)| i);
         let index = match found {
             Some(index) => index,
             None => {
@@ -234,6 +279,7 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
                     size,
                     free: (0..slots).rev().map(|i| (i, false)).collect(),
                     used: 0,
+                    empty_at: None,
                 };
                 match all.0.iter().position(Option::is_none) {
                     Some(empty) => {
@@ -250,6 +296,7 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
         let slab = all.0[index].as_mut()?;
         let (slot, used_before) = slab.free.pop()?;
         slab.used += 1;
+        slab.empty_at = None;
         (index, slot, !used_before, slab.heap.clone())
     };
     let desc = D3D12_RESOURCE_DESC {
@@ -283,9 +330,13 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
         }
         (made, _) => {
             once!(error = ?made.err(), "a staging buffer could not be placed in an upload heap; made alone");
+            let calls = all.2;
             if let Some(slab) = all.0[index].as_mut() {
                 slab.free.push((slot, !fresh));
                 slab.used -= 1;
+                if slab.used == 0 {
+                    slab.empty_at = Some(calls);
+                }
             }
             None
         }
@@ -293,38 +344,25 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
 }
 
 /// `buffer` is let go: if it was placed in a slab, its slot is free again.
-/// A slab left with no buffer is let go at a later call (its last buffer
-/// is dropped after this returns), unless it is the only free room of its
-/// size.
+/// A slab left with no buffer is let go at a later call ([`slabs_purge`]):
+/// its last buffer is dropped after this returns.
 fn slab_release(buffer: &ID3D12Resource) {
-    use std::sync::atomic::Ordering::Relaxed;
     if !slabs_on() {
         return;
     }
     let mut all = SLABS.lock().unwrap_or_else(|e| e.into_inner());
     let all = &mut *all;
-    // Empty slabs from earlier calls: their buffers are gone by now. One of
-    // each size is kept.
-    let mut kept_sizes: Vec<u64> = Vec::new();
-    for entry in &mut all.0 {
-        if let Some(slab) = entry
-            && slab.used == 0
-            && slab.free.iter().all(|&(_, before)| before)
-        {
-            if kept_sizes.contains(&slab.size) {
-                *entry = None;
-                SLAB_STATS[2].fetch_add(1, Relaxed);
-            } else {
-                kept_sizes.push(slab.size);
-            }
-        }
-    }
+    all.2 += 1;
+    slabs_purge(&mut all.0, all.2);
     let Some((index, slot)) = all.1.as_mut().and_then(|m| m.remove(&(windows::core::Interface::as_raw(buffer) as usize))) else {
         return;
     };
     if let Some(Some(slab)) = all.0.get_mut(index) {
         slab.free.push((slot, true));
         slab.used -= 1;
+        if slab.used == 0 {
+            slab.empty_at = Some(all.2);
+        }
     }
 }
 
