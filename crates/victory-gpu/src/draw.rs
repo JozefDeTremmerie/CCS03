@@ -2310,7 +2310,7 @@ impl State {
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
-        self.watch_writes(p);
+        self.watch_writes(p, Some([x, y, z]));
         let ambient = self.ambient(list, p);
         let reflections = self.reflections(list, p);
         if ambient || reflections {
@@ -2379,7 +2379,8 @@ impl State {
     /// around them, if it is the pass that keeps them ([`crate::reflect`]).
     /// After a dispatch of `p`: the buffers it writes, if its program is
     /// watched (`VICTORY_WATCH_PROGRAMS`, `crate::watchprog`).
-    fn watch_writes(&self, p: &crate::pipeline::host::HostPipeline) {
+    /// `groups`: a direct dispatch's group counts (none: indirect).
+    fn watch_writes(&self, p: &crate::pipeline::host::HostPipeline, groups: Option<[u32; 3]>) {
         if !crate::watchprog::on() {
             return;
         }
@@ -2392,6 +2393,7 @@ impl State {
         if !crate::watchprog::watched(&program) {
             return;
         }
+        crate::watchprog::dispatched(&program, groups);
         let roots = self.roots_ref(true);
         for u in stage.translated().used.iter().filter(|u| u.kind == ResourceType::Uav) {
             let slot = format!("{:?} {}/{}", u.root, u.slot, u.table_offset_dwords);
@@ -3677,7 +3679,7 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
-            self.watch_writes(p);
+            self.watch_writes(p, None);
             // The title runs its reflections' history pass indirectly too.
             if self.reflections(list, p) {
                 // Our pass set its own heap, root signature and pipeline:
