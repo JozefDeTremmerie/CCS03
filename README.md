@@ -37,7 +37,7 @@ title you need your own copy.
 
 ## Status
 
-CCS03 follows victory-fork `main` (base `085ee7c`, 25 November, evening). What
+CCS03 follows victory-fork `main` (base `32b31f7`, 25 November, late evening). What
 follows is what CCS03 itself has seen, with its own code on top of that base.
 
 ### Where it stands
@@ -52,7 +52,7 @@ of 8 GB, on a laptop (GeForce RTX 4060 Laptop GPU, Ryzen 9 7845HX):
 | In the world | yes: the opening cutscene (the diner) plays with sound, characters and room lit |
 | Playable | yes, slowly: the player walks Lucia through the cell, the prison yard and the prologue's later scenes, and steers Jason's boat, with an Xbox pad, a PlayStation 5 pad (read by CCS03 itself, no helper program) or the keyboard |
 | Frame rate | 30 fps in the menus; 1 to 3 fps in the opening cutscene (slowest in its first minutes while textures stream onto the 8 GB card); 3 to 7.8 fps in the prison and on the water (127 to 300 ms a frame, 3,400 to 6,000 draws) |
-| Stability | runs of 2.5 to 22.5 minutes, each closed by us: no crash, out-of-memory or device removal |
+| Stability | runs of 2.5 to 31 minutes, each closed by us: no crash, out-of-memory or device removal |
 | Story | Lucia's prologue played through to chapter 1, and on into Jason's first mission (the boat, following the plane); that mission fails so far ("Cal fell off the boat"): the water is drawn through the boat, and the boat is hard to steer at 3 to 8 fps |
 
 Videos of the laptop runs of 25 November:
