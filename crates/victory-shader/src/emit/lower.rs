@@ -1287,6 +1287,7 @@ impl<'a> Lower<'a> {
             console_lanes = insts().any(|i| {
                 let n = i.name();
                 n.starts_with("ds_swizzle")
+                    || n.starts_with("v_permlane")
                     || n.contains("permute")
                     || n.starts_with("v_mbcnt")
                     || matches!(n, "v_readlane_b32" | "v_writelane_b32")
@@ -11939,6 +11940,25 @@ mod tests {
             // One image handle, from the join's per-lane heap index.
             assert_eq!(l.nonuniform_handles, 1);
             assert!(!l.wave_ops);
+        }
+    }
+
+    #[test]
+    fn permlane16_and_x16_lower() {
+        // v_permlane16_b32 / v_permlanex16_b32 v1, v0, 0, 1; s_endpgm. Before
+        // these lowered, a shader using one failed with "`...` is not
+        // supported" and its pipeline was dropped (one of issue #38's).
+        for first in [0xD777_0001u32, 0xD778_0001] {
+            let words = [
+                first,
+                0x0205_0100, // v_permlane* v1, v0, 0, 1
+                0xD834_0000,
+                0x0000_0100, // ds_write_b32 v0, v1 (keeps the pick live)
+                S_ENDPGM,
+            ];
+            let l = lower_with(&words, vec![], vec![]).expect("permlane must lower");
+            // It reads another lane, within the 32-lane half.
+            assert!(l.wave_ops, "the result comes from another lane");
         }
     }
 
