@@ -60,8 +60,15 @@ enum Held {
     Running,
     /// With [`present_behind`]: the title's present of a frame, due after
     /// what the queue holds before it: the host texture shown, the state
-    /// the title's lists leave it in, and the frame's number.
-    Present(windows::Win32::Graphics::Direct3D12::ID3D12Resource, u32, u64),
+    /// the title's lists leave it in, the frame's number, and the second
+    /// plane drawn over it, if the present has one (its host texture and
+    /// the state the lists leave that in).
+    Present(
+        windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        u32,
+        u64,
+        Option<(windows::Win32::Graphics::Direct3D12::ID3D12Resource, u32)>,
+    ),
 }
 
 /// Presents that are in a queue's line and have not run ([`Held::Present`]).
@@ -113,10 +120,10 @@ fn present_behind() -> bool {
 /// the queue `this` holds. False if it has to run the old way.
 #[cfg(windows)]
 fn send_behind(this: This, planes: u32, plane_parameters: *const Plane) -> bool {
-    // A second plane (the interface, in the title's Series S mode) is drawn
-    // over the first in the present itself (`crate::over`), which this
-    // path does not carry: such presents run in place.
-    if this.is_null() || planes != 1 || PRESENTS_HELD.load(Ordering::Relaxed) != 0 {
+    // A second plane (the interface, in the title's Series S mode) goes
+    // with the present and is drawn over the first when it runs
+    // (`crate::over`), as in place. More than two: run in place.
+    if this.is_null() || planes == 0 || planes > 2 || PRESENTS_HELD.load(Ordering::Relaxed) != 0 {
         return false;
     }
     let frame = FRAMES.load(Ordering::Relaxed) + 1;
@@ -143,9 +150,19 @@ fn send_behind(this: This, planes: u32, plane_parameters: *const Plane) -> bool 
     let state = crate::resource::host_transition(resource, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before);
     crate::resource::host_transition(resource, state);
     let texture = texture.clone();
+    // The second plane, looked at the same way: the state the lists leave
+    // it in is the one the present's own list finds it in behind them.
+    const READABLE: u32 = 0x80;
+    // SAFETY: the title passes `planes` plane descriptions.
+    let over = unsafe { second_plane(planes, plane_parameters, resource) }.and_then(|r| {
+        let plane = crate::resource::host_resource(r)?.clone();
+        let was = crate::resource::host_transition(r, READABLE).map_or(READABLE, |(_, before)| before);
+        crate::resource::host_transition(r, was);
+        Some((plane, was))
+    });
     let sent = hold(this, || {
         PRESENTS_HELD.fetch_add(1, Ordering::Relaxed);
-        Held::Present(texture, state, frame)
+        Held::Present(texture, state, frame, over)
     });
     if sent {
         PRESENTS_BEHIND.fetch_add(1, Ordering::Relaxed);
@@ -632,10 +649,11 @@ fn release_held_now(all: bool) {
                             }
                         }
                     }
-                    Held::Present(texture, state, frame) => {
+                    Held::Present(texture, state, frame, over) => {
                         let show = || {
                             if let Some(host) = crate::host::host() {
-                                let _ = host.present(&texture, state, frame, None);
+                                let over = over.as_ref().map(|(plane, was)| (plane, *was));
+                                let _ = host.present(&texture, state, frame, over);
                             }
                         };
                         if all {
