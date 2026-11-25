@@ -9378,6 +9378,13 @@ impl<'a> Lower<'a> {
             return Err("one input interpolated two ways");
         }
         e.interp = mode;
+        if let Some(row_num) = e.row {
+            for (k, other) in self.s.inputs.iter_mut().enumerate() {
+                if k != id && other.row == Some(row_num) && other.usage == 0 {
+                    other.interp = mode;
+                }
+            }
+        }
         let Eval::Weights { p0, i, j } = eval else {
             return match self.load_any_input(id, col) {
                 Val::I32(x) => Ok(x),

@@ -619,13 +619,31 @@ fn emit_program(
         }
     };
     let pixel = native.stage == HwStage::Ps;
+    let sort_sig = |els: &mut [container::SigElement]| {
+        els.sort_by_key(|e| (e.row.unwrap_or(u32::MAX), e.col));
+    };
     let mut inputs = sig(FourCC::ISG1)?;
     let mut outputs = sig(FourCC::OSG1)?;
-    // Interpolation as DXC declares it by default; pixel inputs that are
-    // read get the mode their barycentrics say.
+    sort_sig(&mut inputs);
+    sort_sig(&mut outputs);
+    let psv = c
+        .part(FourCC::PSV0)
+        .and_then(|p| container::psv_signature(p.data));
+    // Interpolation as the console PSV0 (or DXC defaults) declares it; pixel
+    // inputs that are read get the mode their barycentrics say.
+    let psv_els = psv
+        .as_ref()
+        .map(|p| if pixel { p.0.as_slice() } else { p.1.as_slice() });
     let interpolated = if pixel { &mut inputs } else { &mut outputs };
     for e in interpolated {
-        e.interp = match (e.kind, e.comp) {
+        let matched = psv_els.and_then(|els| {
+            els.iter()
+                .find(|p| {
+                    p.row == e.row && p.col == e.col && p.cols == e.cols && p.kind == e.kind
+                })
+                .map(|p| p.interp)
+        });
+        e.interp = matched.unwrap_or(match (e.kind, e.comp) {
             (3, _) => 4,
             // Constant, as DXC declares it (the AMD compiler crashed on a
             // front face without a mode).
@@ -635,7 +653,7 @@ fn emit_program(
             (0 | 6 | 7, 9) => 2,
             (0, _) => 1,
             _ => 0,
-        };
+        });
     }
     // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
     // wants the position centroid (or per sample), as DXC declares it then.
@@ -649,6 +667,7 @@ fn emit_program(
     // primitive export), so those rows are left out.
     let mut prims = sig(FourCC::PSG1)?;
     prims.retain(|e| !matches!(e.kind, 10 | 30));
+    sort_sig(&mut prims);
     for e in &mut prims {
         e.interp = 1;
     }
@@ -1894,5 +1913,93 @@ mod barycentric_tests {
         let [e0, e1] = exp_mrt0(4);
         let words = [0xC812_0000, e0, e1, S_ENDPGM];
         assert!(pixel(&words, PERSP_CENTER).is_err());
+    }
+
+    /// Reordered same-row signature elements (`col = 1` before `col = 0`) and
+    /// matching `PSV0` `nointerpolation` modes across float/uint packed siblings
+    /// validate against `dxil.dll`.
+    #[test]
+    fn packed_signature_row_sorts_columns_and_uses_psv_interp() {
+        // v_interp_mov_f32 v2, p0, attr0.y (col 1 of row 0, flat/constant);
+        // exp mrt0 v2, v2, v2, v2 done vm.
+        let [e0, e1] = exp_mrt0(2);
+        let words = [0xC80A_0102, e0, e1, S_ENDPGM];
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 4,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ps {
+                inputs: vec![PsInput {
+                    usage: Usage::Generic,
+                    row: 0,
+                    mask: 0b0011,
+                    attr: 0,
+                    flat: true,
+                    fp16: false,
+                    pack2: false,
+                    row2: 0,
+                }],
+                input_addr: PERSP_CENTER,
+                db_shader_control: 0,
+                patches: vec![],
+            },
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        // Console ISG1 intentionally places (row=0, col=1, f32) before (row=0, col=0, uint),
+        // with PSV0 marking both constant (`interp = 1`).
+        let f32_hi = SigElement {
+            name: "TEXCOORD".into(),
+            index: 1,
+            kind: 0,
+            comp: 9,
+            interp: 1,
+            row: Some(0),
+            col: 1,
+            cols: 1,
+            usage: 1,
+            half: false,
+        };
+        let u32_lo = SigElement {
+            name: "COLOR".into(),
+            index: 0,
+            kind: 0,
+            comp: 5,
+            interp: 1,
+            row: Some(0),
+            col: 0,
+            cols: 1,
+            usage: 0,
+            half: false,
+        };
+        let mut target = element("SV_Target", 16, 0);
+        target.usage = 15;
+        let isg1 = container::signature(&[f32_hi.clone(), u32_lo.clone()], true);
+        let osg1 = container::signature(&[target.clone()], false);
+        let psv0 = container::psv(&container::Psv {
+            stage: 0,
+            flag: false,
+            inputs: &[f32_hi, u32_lo],
+            outputs: &[target],
+            prims: &[],
+            mesh: None,
+            geometry: None,
+            bindings: &[],
+            threads: [0; 3],
+            wave_size: None,
+        });
+        let bytes = crate::dxbc::build(&[
+            (FourCC::ISG1, &isg1),
+            (FourCC::OSG1, &osg1),
+            (FourCC::PSV0, &psv0),
+        ]);
+        let c = Container::parse(&bytes).unwrap();
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let res = resource::track(&p, &native.layout, native.stage, None).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        let st = structure::structure(&p).unwrap();
+        let shader = emit(&c, &native, &p, &st, &io, &res).unwrap();
+        validate(&shader);
     }
 }
