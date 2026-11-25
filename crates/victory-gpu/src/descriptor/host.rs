@@ -1966,8 +1966,22 @@ impl HostHeap {
         let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
-        let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         let view = (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
+        // A slot made now for a draw may need its texture's host copy made
+        // first: a call into the graphics kernel, a quarter of a millisecond
+        // to milliseconds. It is made before the heap's slots are locked, not
+        // inside `make` with them held: while the world streams in, the pass
+        // over textures picked by index made hundreds a frame that way, and
+        // every other thread that mirrored a slot of the heap stood waiting
+        // (a cutscene's first seconds, 25 November: 450 ms a frame of
+        // waiting for this lock on the recording threads).
+        if for_draw
+            && let Some(view) = &view
+            && self.made.lock().unwrap_or_else(|e| e.into_inner())[index as usize] != key
+        {
+            host_copy_first(view);
+        }
+        let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         let Some(view) = view else {
             // Not a view of ours (never written, or of a resource the
             // title released): nothing to read.
@@ -2827,6 +2841,21 @@ fn twin_uav(
         (other, _) => other,
     };
     Some(desc)
+}
+
+/// Makes the host copy of the texture `view` shows, if it has none yet
+/// (what [`make`] would make), so that `make` only looks it up. Buffers and
+/// other views: nothing.
+fn host_copy_first(view: &View) {
+    let resource = match view {
+        &View::Shader(r, _) | &View::Unordered(r, _, _) => r as crate::object::This,
+        View::Placed(false, ..) => match placed_texture(view) {
+            Some(View::Shader(r, _)) => r as crate::object::This,
+            _ => return,
+        },
+        _ => return,
+    };
+    let _ = crate::resource::host_resource(resource);
 }
 
 /// Makes the host descriptor for `view` at `at`: the host resource it

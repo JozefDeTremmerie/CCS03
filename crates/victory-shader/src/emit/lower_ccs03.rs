@@ -5,6 +5,19 @@
 use super::*;
 
 impl Lower<'_> {
+    /// Whether a read of another lane of this lane's quad (a quad swizzle
+    /// or a quad permutation) must reach helper lanes: in a pixel shader,
+    /// always. At a triangle's edge the quad's other pixels are helpers,
+    /// which only quad reads see; a wave read of a helper lane gives
+    /// nothing defined. A derivative the title takes by hand then was the
+    /// whole value, the texture read that used it took its smallest level,
+    /// and triangles' edges showed as lines on car paint, glass and skin.
+    /// After Belobug/VIctory-Belobug-AMD 03629f3, whose lowering this
+    /// tree's does not share (the two quad sites only).
+    pub(super) fn helpers_read(&self, quad: bool) -> bool {
+        quad && self.s.pixel
+    }
+
     /// `x * 2^e` for any i32 `e`, rounded once unless the result is a
     /// denormal. DXIL has no ldexp: `x` is multiplied by three powers of
     /// two that are each a normal float. Past ±375 any finite nonzero `x`
