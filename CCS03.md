@@ -39,6 +39,7 @@ Windows with an NVIDIA GPU (32-lane waves).
 | CCS03 PR 26: immediate samplers chosen by control flow (victory-fork PR 25, 40 programs among them cascade shadows) and the ordered pixel section as rasterizer-ordered views (PR 215, 10 programs); CCS03's own lowering moved to `lower_ccs03.rs` for the policy's size limit | Noname0202, arminkhaleghirod; CCS03 |
 | CCS03 PR 27: victory-fork `main` at `0b0074e` (submit thread, copy queue, draw windows, copies in place, frame log) and its PR 823 (64-lane compute programs NVIDIA refused, page-mapping copies as one view) | fxceless, Felix2180 |
 | CCS03 PR 28: textures without their largest levels on 8 GB cards (`VICTORY_TEXTURE_DROP_MIPS`, from victory-fork PR 814); the indirect budget test no longer asks which draws win | staronthehorizon; CCS03 |
+| VIctory PR 684: shader tests find the PC compiler independently of the validator | Dathinel |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
 of the title and the technical details. When merging victory-fork `main`,
@@ -55,7 +56,6 @@ covers it. "Applies" says how its change lands on the new base.
 | Change | Author | Applies |
 |---|---|---|
 | VIctory PR 477: DXIL validator without undefined behaviour on null error blobs, checked status, no leaked handles | nathanbzrr | cleanly |
-| VIctory PR 684: tests find the PC compiler (`dxc.exe`) independently of the validator | Dathinel | cleanly |
 | VIctory PR 596: `v_cvt_pknorm_*` with exact rounding | mercuryVM | cleanly |
 | HLE: file path in DirectStorage request failure warnings | Apenshot123 | cleanly |
 | HLE: `source_path` guarded against unsupported DirectStorage options | Apenshot123 | small conflict |
