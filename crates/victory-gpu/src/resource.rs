@@ -2164,6 +2164,31 @@ fn host_texture(
 /// [`host_texture`]; `reserved`: without memory of its own, to be given
 /// tiles level by level (`crate::tiles`).
 #[cfg(windows)]
+/// Host copies of textures the title fills made without the card clearing
+/// their memory first (`D3D12_HEAP_FLAG_CREATE_NOT_ZEROED`;
+/// `VICTORY_TEXTURE_ZEROED=1`: cleared, as before).
+///
+/// Why: the profile of the opening cutscene's first minutes (laptop, RTX
+/// 4060 8 GB, 25 November) has the pass over the heap's texture slots at
+/// 500-1,500 ms a frame, and 46 % of it inside `CreateCommittedResource`,
+/// waiting in the kernel (`D3DKMTWaitForSynchronizationObjectFromCpu`) for
+/// the card to clear the new texture's memory: thousands of textures a
+/// minute, each waited for in turn by the thread that records the frame.
+/// Such a texture is written whole by the upload recorded right after it
+/// is made (levels not there yet are uploaded as zeros), so the clear is
+/// never seen.
+fn not_zeroed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_ZEROED").is_none_or(|v| v != "1"))
+        && !NOT_ZEROED_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Host textures made without clearing since the start ([`not_zeroed`]).
+pub(crate) static NOT_ZEROED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The device refused a texture made without clearing: no more are asked.
+static NOT_ZEROED_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn host_texture_as(
     desc: &ResourceDesc,
     state: u32,
@@ -2246,20 +2271,46 @@ fn host_texture_as(
             )
         }
     } else {
-        // SAFETY: the description has the host layout (checked size, same
-        // fields); the out pointer is ours.
-        unsafe {
-            host.device.CreateCommittedResource(
-                &heap,
-                D3D12_HEAP_FLAG_NONE,
-                (&raw const d).cast(),
-                D3D12_RESOURCE_STATES(
-                    crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
-                ),
-                // The same layout: format, then color or depth and stencil.
-                clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
-                &mut texture,
-            )
+        // A texture the title fills is written whole by its first upload
+        // before anything samples it: the card need not clear its memory
+        // first ([`not_zeroed`]). Targets and unordered textures are cleared
+        // as before.
+        let quiet = fills(desc) && not_zeroed();
+        let create = |flags: D3D12_HEAP_FLAGS, texture: &mut Option<ID3D12Resource>| {
+            // SAFETY: the description has the host layout (checked size, same
+            // fields); the out pointer is ours.
+            unsafe {
+                host.device.CreateCommittedResource(
+                    &heap,
+                    flags,
+                    (&raw const d).cast(),
+                    D3D12_RESOURCE_STATES(
+                        crate::host::legal_for(d.flags, crate::host::texture_state(state)) as i32,
+                    ),
+                    // The same layout: format, then color or depth and stencil.
+                    clear_value.as_ref().map(|v| std::ptr::from_ref(v).cast()),
+                    texture,
+                )
+            }
+        };
+        if quiet {
+            match create(D3D12_HEAP_FLAG_CREATE_NOT_ZEROED, &mut texture) {
+                Ok(()) => {
+                    if NOT_ZEROED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                        tracing::info!("host copies of textures the title fills are made without the card clearing them (VICTORY_TEXTURE_ZEROED=1: cleared)");
+                    }
+                    Ok(())
+                }
+                // A runtime or driver that refuses the flag: as before.
+                Err(e) => {
+                    tracing::info!(error = %e, "a texture made without clearing was refused; made cleared from now on");
+                    NOT_ZEROED_REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+                    texture = None;
+                    create(D3D12_HEAP_FLAG_NONE, &mut texture)
+                }
+            }
+        } else {
+            create(D3D12_HEAP_FLAG_NONE, &mut texture)
         }
     };
     if let Err(e) = made {
