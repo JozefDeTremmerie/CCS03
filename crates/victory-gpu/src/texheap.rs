@@ -11,14 +11,16 @@
 //! over the heap's texture slots, which takes 500 to 1,500 ms of each
 //! frame then, on the thread that records it. A texture placed in a heap
 //! that is already there takes neither: one heap of [`HEAP_BYTES`] is
-//! made and waited for once for some dozens of textures.
+//! made and waited for once for 16 to 256 textures. Most of the textures
+//! streamed in are small: only those of at most [`LARGEST`] go into heaps.
 //!
 //! A texture's place is given back when its host copy goes, once the
 //! submissions running then have finished (`crate::host::retire`). A heap
-//! left empty is let go at a later call, one empty heap kept. Textures over
-//! [`LARGEST`], with a clear value or another alignment are made as before.
+//! left empty is let go at a later call, one empty heap of each size kept.
+//! Textures over [`LARGEST`], with a clear value or another alignment are
+//! made as before.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -26,21 +28,34 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::core::Interface;
 
 /// The bytes of one heap.
-const HEAP_BYTES: u64 = 64 << 20;
-/// The largest texture placed in a heap.
-const LARGEST: u64 = 16 << 20;
-/// Places are given in this grain (a texture's own alignment).
+const HEAP_BYTES: u64 = 16 << 20;
+/// The largest texture placed in a heap; larger ones are made as before.
+const LARGEST: u64 = 1 << 20;
+/// The smallest slot (a texture's own alignment).
 const GRAIN: u64 = 64 << 10;
+/// The most bytes of free slots in all heaps together before no new heap
+/// is made: past it, a texture with no free slot of its size is made as
+/// before, so that free slots never take the card's room from textures.
+const SLACK_MOST: u64 = 256 << 20;
 
 /// Heaps made, textures placed, heaps let go, and the bytes of the heaps
 /// alive, since the start.
 pub(crate) static STATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
+/// A heap of slots of one size (a power of two from [`GRAIN`] to
+/// [`LARGEST`]).
+///
+/// One size a heap, and a texture goes into the fullest heap of its size
+/// that has a free slot: the textures still alive gather in few heaps, and
+/// the others empty and are let go. (A first version placed textures of
+/// all sizes in 64 MB heaps, first fit: the textures that outlived the
+/// loading screen were scattered over all of them, the heaps held 2.8 GB
+/// more than their textures, and the card had no room for new ones.)
 struct Heap {
     heap: ID3D12Heap,
-    /// Free ranges by offset: their length.
-    free: BTreeMap<u64, u64>,
-    used: u64,
+    size: u64,
+    free: Vec<u32>,
+    used: u32,
     /// The call at which it was left empty.
     empty_at: Option<u64>,
 }
@@ -50,8 +65,9 @@ unsafe impl Send for Heap {}
 
 struct Heaps {
     list: Vec<Option<Heap>>,
-    /// The place of each texture in a heap, by the texture's address.
-    placed: Option<HashMap<usize, (usize, u64, u64)>>,
+    /// The place of each texture in a heap, by the texture's address:
+    /// the heap's index and the slot.
+    placed: Option<HashMap<usize, (usize, u32)>>,
     calls: u64,
 }
 
@@ -73,65 +89,45 @@ pub(crate) fn on() -> bool {
 
 impl Heaps {
     /// Lets go of heaps left empty at an earlier call (their last texture
-    /// is gone by now), keeping one empty heap.
+    /// is gone by now), keeping one empty heap of each size.
     fn purge(&mut self) {
-        let mut kept = false;
+        let mut kept: Vec<u64> = Vec::new();
         for entry in &mut self.list {
             let Some(heap) = entry else { continue };
-            match heap.empty_at {
-                Some(at) if heap.used == 0 && at < self.calls => {
-                    if kept {
-                        STATS[2].fetch_add(1, Relaxed);
-                        STATS[3].fetch_sub(HEAP_BYTES, Relaxed);
-                        *entry = None;
-                    } else {
-                        kept = true;
-                    }
+            if heap.used == 0 && heap.empty_at.is_some_and(|at| at < self.calls) {
+                if kept.contains(&heap.size) {
+                    STATS[2].fetch_add(1, Relaxed);
+                    STATS[3].fetch_sub(HEAP_BYTES, Relaxed);
+                    *entry = None;
+                } else {
+                    kept.push(heap.size);
                 }
-                _ => {}
             }
         }
     }
 
-    /// A free range of `size` bytes: the heap's index and the offset.
-    fn take(&mut self, size: u64) -> Option<(usize, u64)> {
-        for (index, entry) in self.list.iter_mut().enumerate() {
-            let Some(heap) = entry else { continue };
-            let found = heap.free.iter().find(|&(_, &len)| len >= size).map(|(&at, &len)| (at, len));
-            if let Some((at, len)) = found {
-                heap.free.remove(&at);
-                if len > size {
-                    heap.free.insert(at + size, len - size);
-                }
-                heap.used += size;
-                heap.empty_at = None;
-                return Some((index, at));
-            }
-        }
-        None
+    /// A free slot of `size` in the fullest heap of that size that has one.
+    fn take(&mut self, size: u64) -> Option<(usize, u32)> {
+        let index = self
+            .list
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| h.as_ref().filter(|h| h.size == size && !h.free.is_empty()).map(|h| (i, h.used)))
+            .max_by_key(|&(_, used)| used)?
+            .0;
+        let heap = self.list[index].as_mut()?;
+        let slot = heap.free.pop()?;
+        heap.used += 1;
+        heap.empty_at = None;
+        Some((index, slot))
     }
 
-    /// Gives `[at, at + size)` of heap `index` back.
-    fn give_back(&mut self, index: usize, at: u64, size: u64) {
+    fn give_back(&mut self, index: usize, slot: u32) {
         let calls = self.calls;
         let Some(Some(heap)) = self.list.get_mut(index) else { return };
-        let given = size;
-        let (mut at, mut size) = (at, size);
-        if let Some((&before, &len)) = heap.free.range(..at).next_back()
-            && before + len == at
-        {
-            heap.free.remove(&before);
-            at = before;
-            size += len;
-        }
-        if let Some(&len) = heap.free.get(&(at + size)) {
-            heap.free.remove(&(at + size));
-            size += len;
-        }
-        heap.free.insert(at, size);
-        heap.used = heap.used.saturating_sub(given);
-        if heap.free.len() == 1 && heap.free.get(&0) == Some(&HEAP_BYTES) {
-            heap.used = 0;
+        heap.free.push(slot);
+        heap.used = heap.used.saturating_sub(1);
+        if heap.used == 0 {
             heap.empty_at = Some(calls);
         }
     }
@@ -148,20 +144,35 @@ pub(crate) fn place(device: &ID3D12Device, desc: &D3D12_RESOURCE_DESC, state: D3
     if info.SizeInBytes == u64::MAX || info.SizeInBytes > LARGEST || info.Alignment > GRAIN {
         return None;
     }
-    let size = info.SizeInBytes.max(1).next_multiple_of(GRAIN);
-    let (index, at, heap) = {
+    let size = info.SizeInBytes.max(GRAIN).next_power_of_two();
+    let (index, slot, heap) = {
         let mut all = heaps();
         all.calls += 1;
         all.purge();
-        let (index, at) = match all.take(size) {
+        let (index, slot) = match all.take(size) {
             Some(found) => found,
             None => {
+                let slack: u64 = all.list.iter().flatten().map(|h| h.free.len() as u64 * h.size).sum();
+                if slack > SLACK_MOST {
+                    return None;
+                }
                 let heap = make_heap(device)?;
-                STATS[0].fetch_add(1, Relaxed);
-                STATS[3].fetch_add(HEAP_BYTES, Relaxed);
+                let made_so_far = STATS[0].fetch_add(1, Relaxed) + 1;
+                let alive = STATS[3].fetch_add(HEAP_BYTES, Relaxed) + HEAP_BYTES;
+                if made_so_far.is_power_of_two() || made_so_far.is_multiple_of(256) {
+                    tracing::info!(
+                        made = made_so_far,
+                        let_go = STATS[2].load(Relaxed),
+                        alive_mb = alive >> 20,
+                        free_slots_mb = slack >> 20,
+                        textures = STATS[1].load(Relaxed),
+                        "texture heaps"
+                    );
+                }
                 let made = Heap {
                     heap,
-                    free: BTreeMap::from([(0, HEAP_BYTES)]),
+                    size,
+                    free: (0..(HEAP_BYTES / size) as u32).rev().collect(),
                     used: 0,
                     empty_at: None,
                 };
@@ -173,25 +184,25 @@ pub(crate) fn place(device: &ID3D12Device, desc: &D3D12_RESOURCE_DESC, state: D3
             }
         };
         let heap = all.list[index].as_ref()?.heap.clone();
-        (index, at, heap)
+        (index, slot, heap)
     };
     let mut texture: Option<ID3D12Resource> = None;
-    // SAFETY: a texture at its own free range of the heap, which nothing
-    // else uses; the out pointer is ours.
-    let made = unsafe { device.CreatePlacedResource(&heap, at, desc, state, None, &mut texture) };
+    // SAFETY: a texture at its own slot of the heap, which nothing else
+    // uses; the out pointer is ours.
+    let made = unsafe { device.CreatePlacedResource(&heap, u64::from(slot) * size, desc, state, None, &mut texture) };
     let mut all = heaps();
     match (made, texture) {
         (Ok(()), Some(texture)) => {
-            all.placed.get_or_insert_with(HashMap::new).insert(texture.as_raw() as usize, (index, at, size));
+            all.placed.get_or_insert_with(HashMap::new).insert(texture.as_raw() as usize, (index, slot));
             if STATS[1].fetch_add(1, Relaxed) == 0 {
-                tracing::info!("host copies of textures the title fills are placed in shared heaps of the card's memory (VICTORY_TEXTURE_HEAPS=0: each with its own)");
+                tracing::info!("host copies of small textures the title fills are placed in shared heaps of the card's memory (VICTORY_TEXTURE_HEAPS=0: each with its own)");
             }
             Some(texture)
         }
         (made, _) => {
             static SAID: std::sync::Once = std::sync::Once::new();
             SAID.call_once(|| tracing::warn!(error = ?made.err(), "a texture could not be placed in a shared heap; made with its own memory"));
-            all.give_back(index, at, size);
+            all.give_back(index, slot);
             None
         }
     }
@@ -224,19 +235,24 @@ fn make_heap(device: &ID3D12Device) -> Option<ID3D12Heap> {
 }
 
 /// A texture's place in a heap, given back when this is dropped.
-struct Place(usize, u64, u64);
+struct Place(usize, u32);
 
 impl Drop for Place {
     fn drop(&mut self) {
-        heaps().give_back(self.0, self.1, self.2);
+        heaps().give_back(self.0, self.1);
     }
+}
+
+/// The bytes of the free slots in all heaps.
+pub(crate) fn slack() -> u64 {
+    heaps().list.iter().flatten().map(|h| h.free.len() as u64 * h.size).sum()
 }
 
 /// The host copy `texture` goes: its place in a heap, if it has one, is
 /// free again once the submissions running now have finished.
 pub(crate) fn release(texture: &ID3D12Resource) {
     let place = heaps().placed.as_mut().and_then(|p| p.remove(&(texture.as_raw() as usize)));
-    if let Some((index, at, size)) = place {
-        crate::host::retire(Place(index, at, size));
+    if let Some((index, slot)) = place {
+        crate::host::retire(Place(index, slot));
     }
 }

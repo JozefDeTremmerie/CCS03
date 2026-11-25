@@ -1530,9 +1530,14 @@ pub(crate) fn room() -> bool {
     if let Some(limit) = limit {
         return filled < limit;
     }
+    // Free slots of the texture heaps are room for textures, though the
+    // card counts them as in use (`crate::texheap`).
+    let slack = crate::texheap::slack();
     room_for(
         filled,
-        crate::host::host().and_then(|h| h.video_memory()),
+        crate::host::host()
+            .and_then(|h| h.video_memory())
+            .map(|[budget, used, shared_budget, shared_used]| [budget, used.saturating_sub(slack), shared_budget, shared_used]),
         room_percent(),
         crate::shadow::card_room_kept() + targets_room_kept(),
     )
