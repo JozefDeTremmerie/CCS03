@@ -638,6 +638,48 @@ fn known_bits() -> &'static [std::sync::atomic::AtomicU64] {
     KNOWN.get_or_init(|| (0..KNOWN_BLOCKS / 64).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())
 }
 
+/// Of those, the blocks noted absent ([`Guards::absent`]), kept the same
+/// way: [`guard`] asks the kernel about them before it takes the lock.
+static ABSENT: std::sync::OnceLock<Box<[std::sync::atomic::AtomicU64]>> = std::sync::OnceLock::new();
+
+fn absent_bits() -> &'static [std::sync::atomic::AtomicU64] {
+    ABSENT.get_or_init(|| (0..KNOWN_BLOCKS / 64).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())
+}
+
+/// For the blocks of `[first, last)` the bits say are absent: where the
+/// memory that is not committed from each of them ends ([`uncommitted_end`]),
+/// asked of the kernel without the guards' lock. In order, one entry per
+/// region asked about: `(block, end)`.
+///
+/// Why: [`guard`] asked this under the lock, and the wide workers waited
+/// for it (profile of 26 November: the lock's holders were mostly in
+/// `NtQueryVirtualMemory` for it, the workers stood 229 ms a frame together
+/// waiting). An answer gone stale meanwhile does no harm: the lock's own
+/// set of absent blocks still decides which blocks the answer is used for,
+/// and the runtime's remaps take blocks out of it under the lock.
+fn absent_ends(first: usize, last: usize) -> Vec<(usize, usize)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let bits = absent_bits();
+    let mut ends = Vec::new();
+    let mut block = first;
+    let last = last.min(KNOWN_BLOCKS);
+    while block < last {
+        let word = bits[block / 64].load(Relaxed) >> (block % 64);
+        if word == 0 {
+            block = (block / 64 + 1) * 64;
+            continue;
+        }
+        if word & 1 == 0 {
+            block += word.trailing_zeros() as usize;
+            continue;
+        }
+        let end = uncommitted_end(block);
+        ends.push((block, end));
+        block = end.max(block + 1);
+    }
+    ends
+}
+
 /// Whether block `block` is one the guards hold as view memory; `None`
 /// past the bits.
 fn known_bit(block: usize) -> Option<bool> {
@@ -649,16 +691,20 @@ fn known_bit(block: usize) -> Option<bool> {
 /// with the guards' lock held, after a change.
 fn known_sync(g: &Guards, from: usize, to: usize) {
     use std::sync::atomic::Ordering::Relaxed;
-    let bits = known_bits();
+    let (bits, absent_bits) = (known_bits(), absent_bits());
     let viewed = view_known();
-    for block in from..to.min(KNOWN_BLOCKS) {
-        let known = g.protected.contains(&block) || g.absent.contains(&block) || (viewed && g.viewed.contains(&block));
+    let set = |bits: &[std::sync::atomic::AtomicU64], block: usize, on: bool| {
         let bit = 1u64 << (block % 64);
-        if known {
+        if on {
             bits[block / 64].fetch_or(bit, Relaxed);
         } else {
             bits[block / 64].fetch_and(!bit, Relaxed);
         }
+    };
+    for block in from..to.min(KNOWN_BLOCKS) {
+        let absent = g.absent.contains(&block);
+        set(bits, block, g.protected.contains(&block) || absent || (viewed && g.viewed.contains(&block)));
+        set(absent_bits, block, absent);
     }
 }
 
@@ -849,9 +895,11 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
         return None;
     }
     install();
+    let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
+    // Asked before the lock is taken (`absent_ends`).
+    let ends = absent_ends(first, last);
     let mut g = guards();
     let mut written = Vec::new();
-    let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
     // Large heaps are usually clean. Walk only gaps between clean runs.
     let mut uncommitted_until = first;
     for (from, to) in g.clean.uncovered(first, last) {
@@ -862,7 +910,13 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
                 // Ordinary commits need no runtime mapping notification. Reuse
                 // this asking's query for the following blocks in the same region.
                 if block >= uncommitted_until {
-                    uncommitted_until = uncommitted_end(block);
+                    // The answer asked before the lock for the region
+                    // holding this block, else asked now.
+                    let i = ends.partition_point(|&(b, _)| b <= block);
+                    uncommitted_until = match i.checked_sub(1).map(|i| ends[i]) {
+                        Some((b, e)) if b == block || (b < block && block < e) => e.max(block),
+                        _ => uncommitted_end(block),
+                    };
                 }
                 open = block >= uncommitted_until;
                 if open {
