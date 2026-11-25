@@ -447,8 +447,9 @@ pub(crate) fn write_own(at: usize, bytes: &[u8]) -> Option<Vec<usize>> {
         return None;
     }
     // No mapping changes until the bytes are in: the view found below
-    // shows these pages for as long as this is held.
-    let _still = crate::watch::title_memory_reading_now()?;
+    // shows these pages for as long as this is held (the one 64 KiB page
+    // the bytes lie in: CCS03's reads of title memory hold ranges).
+    let _still = crate::watch::title_memory_reading_now(at - at % K64, K64)?;
     let (section, offset, shown, section_bytes) = {
         let v = views();
         let (&base, &(len, section, offset)) = v.views.range(..=at).next_back()?;
