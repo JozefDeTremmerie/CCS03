@@ -1867,6 +1867,9 @@ impl State {
                 }
             }
             let mut partly = None;
+            // A placed texture all of whose memory the look below found
+            // mapped: what is staged needs no second look page by page.
+            let mut mapped_whole = false;
             if let Some(View::Placed(false, resource, desc)) = heap.handle(index).and_then(crate::descriptor::view) {
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
                 let len = crate::resource::placed_bytes(&resource).unwrap_or(1);
@@ -1888,6 +1891,8 @@ impl State {
                         HEAP_TEXTURES_PARTLY[2].fetch_add(1, Ordering::Relaxed);
                     }
                     partly = Some(mapped);
+                } else {
+                    mapped_whole = true;
                 }
             }
             // A texture object the host renders to or writes holds the
@@ -1974,7 +1979,20 @@ impl State {
                 crate::host::log_removal_context();
                 return;
             }
-            let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
+            // Whether all of it is there: asked page by page through the
+            // kernel (`texture::staged`), one read of a byte for every page
+            // the process has not touched yet, which is every page of a
+            // texture just streamed in. In a cutscene's first seconds that
+            // was a fifth of this pass (25 November, the profiler: 8.4 of
+            // 38 s in 83 s). A placed texture the look above found mapped
+            // block by block is taken as whole: the runtime maps title
+            // memory in 64 KiB pages, and a page mapped or unmapped later
+            // makes the slot due again (`texture_slots_remapped`).
+            let (bytes, whole) = if mapped_whole {
+                (crate::texture::staged_bytes(resource).unwrap_or(0), true)
+            } else {
+                crate::texture::staged(resource).unwrap_or((0, true))
+            };
             // Not all of it there: looked at again next frame, and from
             // then on as a slot with nothing new (a placed texture: until
             // more of it is mapped; a texture object at an address the

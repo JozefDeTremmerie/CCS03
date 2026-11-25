@@ -1284,6 +1284,13 @@ pub(crate) fn staged(resource: This) -> Option<(u64, bool)> {
     Some((size as u64, committed(s.memory, size)))
 }
 
+/// The bytes of `resource`'s staging, as [`staged`] has them, without the
+/// look at whether its memory is all there.
+pub(crate) fn staged_bytes(resource: This) -> Option<u64> {
+    let map = STAGING.lock().unwrap_or_else(|e| e.into_inner());
+    Some(map.as_ref()?.get(&(resource as usize))?.layout.size)
+}
+
 /// Whether `[at, at + len)` is committed memory (streamed textures may be
 /// unmapped until their pages arrive).
 pub(crate) fn committed(at: *const u8, len: usize) -> bool {
