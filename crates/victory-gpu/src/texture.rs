@@ -162,7 +162,7 @@ fn staging_buffer(host: &crate::host::Host, total: u64) -> Option<(ID3D12Resourc
 /// (`NtGdiDdDDICreateAllocation`): thousands a minute, more than the pool
 /// of spare buffers can answer while the textures grow. A buffer placed
 /// in a heap that is already there takes no allocation of the kernel's;
-/// a heap holds [`SLAB_BYTES`] of buffers of one size.
+/// a heap holds buffers of one size ([`slab_bytes`]).
 struct Slab {
     heap: ID3D12Heap,
     size: u64,
@@ -175,8 +175,17 @@ struct Slab {
 // SAFETY: a D3D12 heap is free-threaded; the rest is plain data.
 unsafe impl Send for Slab {}
 
-/// The bytes of one slab heap.
+/// The bytes of the smallest slab heap, and the most bytes of one.
 const SLAB_BYTES: u64 = 16 << 20;
+const SLAB_MOST: u64 = 64 << 20;
+
+/// The bytes of a slab heap for buffers of `size`: room for sixteen of
+/// them, but 16 MB at least and 64 MB at most. (16 MB for all sizes made a heap for every second
+/// buffer of 8 MiB: making those heaps was a fifth of the texture pass in
+/// the cutscene's first minutes, each a wait for the kernel.)
+fn slab_bytes(size: u64) -> u64 {
+    (size * 16).clamp(SLAB_BYTES, SLAB_MOST)
+}
 
 /// The slabs (a slab whose heap was let go is `None`), and the slot of each
 /// buffer placed in them, by the buffer's address.
@@ -190,11 +199,11 @@ fn slabs_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_STAGING_SLABS").is_none_or(|v| v != "0"))
 }
 
-/// A mapped buffer of `size` bytes (a power of two, at most [`SLAB_BYTES`])
+/// A mapped buffer of `size` bytes (a power of two, at most 8 MiB)
 /// placed in a slab heap, and whether its bytes are still all zeros.
 fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *mut u8, bool)> {
     use std::sync::atomic::Ordering::Relaxed;
-    if !slabs_on() || size > SLAB_BYTES || !size.is_power_of_two() {
+    if !slabs_on() || size > SLAB_MOST / 8 || !size.is_power_of_two() {
         return None;
     }
     let (index, slot, fresh, heap) = {
@@ -204,7 +213,7 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
             Some(index) => index,
             None => {
                 let desc = D3D12_HEAP_DESC {
-                    SizeInBytes: SLAB_BYTES,
+                    SizeInBytes: slab_bytes(size),
                     Properties: D3D12_HEAP_PROPERTIES {
                         Type: D3D12_HEAP_TYPE_UPLOAD,
                         ..Default::default()
@@ -219,7 +228,7 @@ fn slab_buffer(host: &crate::host::Host, size: u64) -> Option<(ID3D12Resource, *
                     return None;
                 }
                 SLAB_STATS[0].fetch_add(1, Relaxed);
-                let slots = (SLAB_BYTES / size) as u32;
+                let slots = (slab_bytes(size) / size) as u32;
                 let slab = Slab {
                     heap: made?,
                     size,
@@ -1817,7 +1826,13 @@ pub(crate) fn mapped_bytes(at: *const u8, len: usize) -> u64 {
     if start >= end {
         return 0;
     }
-    if !by_query() && (committed(at, 1) || committed((end - 1) as *const u8, 1)) {
+    // By default the regions are walked (below): one question to the kernel
+    // for each run of pages in one state, and none about the working set
+    // (`read_probe`). A texture just streamed in is mapped through views of
+    // the runtime's and is in no working set of ours: the working-set
+    // question answered nothing for it, and was a fifth of the texture pass
+    // in the cutscene's first minutes (profile of 25 November, evening).
+    if !by_query() && read_probe() && (committed(at, 1) || committed((end - 1) as *const u8, 1)) {
         static BY_PAGE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *BY_PAGE.get_or_init(|| std::env::var_os("VICTORY_MAPPED_BY_PAGE").is_some_and(|v| v == "1")) {
             // By page, without the walk: whole pages, cut to the range.
