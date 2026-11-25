@@ -220,11 +220,37 @@ extern "system" fn create_queue(
 
 /// The title asks for 32 MiB and stops if this fails.
 extern "system" fn set_staging_buffer_size(_: Factory, size: u32) -> HRESULT {
-    tracing::info!(size, "dstorage: staging buffer size");
+    let limit = staging_limit(u64::from(size));
+    tracing::info!(size, limit, "dstorage: staging buffer size (and the limit here, VICTORY_DSTORAGE_STAGING_X)");
     if let Some(scheduler) = scheduler() {
-        scheduler.lock().staging = u64::from(size);
+        scheduler.lock().staging = limit;
     }
     S_OK
+}
+
+/// The compressed source in flight here for a staging buffer of `title`
+/// bytes: `title` times `VICTORY_DSTORAGE_STAGING_X` (4 by default, 1 to
+/// 16; 1 is the console's limit). The console's decompression unit is done
+/// with its staging buffer quickly; here every request is inflated and
+/// unpacked by a worker of ours, holds its staging for much longer, and
+/// with the console's limit few run at once: in the first seconds of a
+/// cutscene, 24 workers were on average one busy while textures waited
+/// (CCS03, RTX 4060 Laptop GPU, 25 November). The staging is only
+/// compressed source in this process's memory.
+fn staging_limit(title: u64) -> u64 {
+    static X: OnceLock<u64> = OnceLock::new();
+    let x = *X.get_or_init(|| {
+        std::env::var("VICTORY_DSTORAGE_STAGING_X")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(4)
+    });
+    scaled_staging(title, x)
+}
+
+/// [`staging_limit`] for a factor `x`, which is kept to 1..=16.
+fn scaled_staging(title: u64, x: u64) -> u64 {
+    title.saturating_mul(x.clamp(1, 16))
 }
 
 fn text(name: *const c_char) -> String {
@@ -408,7 +434,7 @@ fn scheduler() -> Option<&'static Scheduler> {
                     next_id: 0,
                     next_seq: 0,
                     staged: 0,
-                    staging: STAGING,
+                    staging: staging_limit(STAGING),
                     staging_reservation: None,
                     starved: false,
                     clock: [0; 3],
@@ -558,7 +584,7 @@ impl Lanes {
         if elapsed.as_secs() >= 5 {
             let waiting: usize = self.lanes.values().map(|l| l.reads.len()).sum();
             let reading = READING.swap(0, Ordering::Relaxed) as f64 / 1e9;
-            tracing::debug!(
+            tracing::info!(
                 requests = *requests,
                 mb_per_s = format_args!("{:.1}", *bytes as f64 / elapsed.as_secs_f64() / 1e6),
                 busy_workers = format_args!("{:.2}", busy.as_secs_f64() / elapsed.as_secs_f64()),
@@ -1248,6 +1274,16 @@ pub(crate) fn module() -> HleModule {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_staging_limit_scales_the_titles_buffer() {
+        let mib = 1u64 << 20;
+        assert_eq!(super::scaled_staging(32 * mib, 4), 128 * mib);
+        assert_eq!(super::scaled_staging(32 * mib, 1), 32 * mib);
+        assert_eq!(super::scaled_staging(32 * mib, 0), 32 * mib, "at least the console's");
+        assert_eq!(super::scaled_staging(32 * mib, 100), 512 * mib, "at most 16 times");
+        assert_eq!(super::scaled_staging(u64::MAX, 4), u64::MAX);
+    }
+
     use std::os::windows::ffi::OsStrExt;
     use std::time::{Duration, Instant};
 
