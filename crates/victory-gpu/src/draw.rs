@@ -1888,9 +1888,14 @@ impl State {
         }) << 20;
         static FRAME: AtomicU64 = AtomicU64::new(u64::MAX);
         static SPENT: AtomicU64 = AtomicU64::new(0);
+        // The microseconds this frame's passes have taken so far: the time
+        // budget is the frame's, not each pass's. (Two passes in a frame
+        // took 750 ms each in the opening cutscene, a frame of 2.8 s.)
+        static SPENT_US: AtomicU64 = AtomicU64::new(0);
         let frame = crate::frame::current();
         if FRAME.swap(frame, Ordering::Relaxed) != frame {
             SPENT.store(0, Ordering::Relaxed);
+            SPENT_US.store(0, Ordering::Relaxed);
         }
         // No more of them are made while the card has no room
         // (`resource::room`): by what is alive now, not by what was ever
@@ -1976,9 +1981,20 @@ impl State {
             Some((ms, bytes)) => {
                 (std::time::Duration::from_millis(ms), SPENT.load(Ordering::Relaxed).saturating_add(bytes))
             }
-            None => (span, per_frame),
+            None => {
+                let spent = std::time::Duration::from_micros(SPENT_US.load(Ordering::Relaxed));
+                (span.saturating_sub(spent), per_frame)
+            }
         };
         let began = std::time::Instant::now();
+        // Counted however the pass ends.
+        struct Spent(std::time::Instant);
+        impl Drop for Spent {
+            fn drop(&mut self) {
+                SPENT_US.fetch_add(self.0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            }
+        }
+        let _spent = Spent(began);
         for (index, write) in due {
             if SPENT.load(Ordering::Relaxed) >= bytes_at_most || began.elapsed() > span {
                 break;

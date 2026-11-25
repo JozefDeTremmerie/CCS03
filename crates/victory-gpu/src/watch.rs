@@ -617,6 +617,97 @@ impl Tracked {
 /// Guarded blocks of view memory.
 const BLOCK: usize = PAGE;
 
+/// Blocks the guards hold as view memory (protected, noted absent, or
+/// viewed with [`view_known`]): one bit each, kept beside [`Guards`] under
+/// its lock and read without it ([`known_bit`]).
+///
+/// Why: the wide workers copy title memory in parallel, and every asking
+/// about a range took the guards' lock just to learn whether its first
+/// block is one of these: in the profile of run 44 the six workers stood
+/// 206 ms a frame together waiting for that lock, most of it in
+/// [`known_view`]. A stale bit is harmless either way: a block wrongly
+/// taken as a view is asked of the guards, under the lock, which find
+/// it is not one; a block wrongly not taken as one is asked of the kernel,
+/// which fails, and then of the guards, as before the bits.
+static KNOWN: std::sync::OnceLock<Box<[std::sync::atomic::AtomicU64]>> = std::sync::OnceLock::new();
+
+/// Blocks the bits cover: title addresses below 1 TiB.
+const KNOWN_BLOCKS: usize = 1 << 24;
+
+fn known_bits() -> &'static [std::sync::atomic::AtomicU64] {
+    KNOWN.get_or_init(|| (0..KNOWN_BLOCKS / 64).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())
+}
+
+/// Of those, the blocks noted absent ([`Guards::absent`]), kept the same
+/// way: [`guard`] asks the kernel about them before it takes the lock.
+static ABSENT: std::sync::OnceLock<Box<[std::sync::atomic::AtomicU64]>> = std::sync::OnceLock::new();
+
+fn absent_bits() -> &'static [std::sync::atomic::AtomicU64] {
+    ABSENT.get_or_init(|| (0..KNOWN_BLOCKS / 64).map(|_| std::sync::atomic::AtomicU64::new(0)).collect())
+}
+
+/// For the blocks of `[first, last)` the bits say are absent: where the
+/// memory that is not committed from each of them ends ([`uncommitted_end`]),
+/// asked of the kernel without the guards' lock. In order, one entry per
+/// region asked about: `(block, end)`.
+///
+/// Why: [`guard`] asked this under the lock, and the wide workers waited
+/// for it (profile of 26 November: the lock's holders were mostly in
+/// `NtQueryVirtualMemory` for it, the workers stood 229 ms a frame together
+/// waiting). An answer gone stale meanwhile does no harm: the lock's own
+/// set of absent blocks still decides which blocks the answer is used for,
+/// and the runtime's remaps take blocks out of it under the lock.
+fn absent_ends(first: usize, last: usize) -> Vec<(usize, usize)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let bits = absent_bits();
+    let mut ends = Vec::new();
+    let mut block = first;
+    let last = last.min(KNOWN_BLOCKS);
+    while block < last {
+        let word = bits[block / 64].load(Relaxed) >> (block % 64);
+        if word == 0 {
+            block = (block / 64 + 1) * 64;
+            continue;
+        }
+        if word & 1 == 0 {
+            block += word.trailing_zeros() as usize;
+            continue;
+        }
+        let end = uncommitted_end(block);
+        ends.push((block, end));
+        block = end.max(block + 1);
+    }
+    ends
+}
+
+/// Whether block `block` is one the guards hold as view memory; `None`
+/// past the bits.
+fn known_bit(block: usize) -> Option<bool> {
+    let word = known_bits().get(block / 64)?;
+    Some(word.load(std::sync::atomic::Ordering::Relaxed) & (1 << (block % 64)) != 0)
+}
+
+/// Brings the bits of blocks `[from, to)` up to what `g` holds; called
+/// with the guards' lock held, after a change.
+fn known_sync(g: &Guards, from: usize, to: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (bits, absent_bits) = (known_bits(), absent_bits());
+    let viewed = view_known();
+    let set = |bits: &[std::sync::atomic::AtomicU64], block: usize, on: bool| {
+        let bit = 1u64 << (block % 64);
+        if on {
+            bits[block / 64].fetch_or(bit, Relaxed);
+        } else {
+            bits[block / 64].fetch_and(!bit, Relaxed);
+        }
+    };
+    for block in from..to.min(KNOWN_BLOCKS) {
+        let absent = g.absent.contains(&block);
+        set(bits, block, g.protected.contains(&block) || absent || (viewed && g.viewed.contains(&block)));
+        set(absent_bits, block, absent);
+    }
+}
+
 /// Whether the block holding `start` is view memory the guards already
 /// hold (read-only by our hand, or noted absent): asking the kernel's write
 /// watch about it can only fail. `VICTORY_VIEW_ASK=1` (or
@@ -631,8 +722,11 @@ fn known_view(start: usize) -> bool {
     if ask {
         return false;
     }
-    let g = guards();
     let first = start / BLOCK;
+    if let Some(known) = known_bit(first) {
+        return known;
+    }
+    let g = guards();
     g.protected.contains(&first) || g.absent.contains(&first) || (view_known() && g.viewed.contains(&first))
 }
 
@@ -791,17 +885,21 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
     // `VICTORY_GUARD_ASK=1` asks every time, as before.
     static ASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let known = !*ASK.get_or_init(|| std::env::var_os("VICTORY_GUARD_ASK").is_some_and(|v| v == "1")) && {
-        let g = guards();
         let first = start / BLOCK;
-        g.protected.contains(&first) || g.absent.contains(&first) || (view_known() && g.viewed.contains(&first))
+        known_bit(first).unwrap_or_else(|| {
+            let g = guards();
+            g.protected.contains(&first) || g.absent.contains(&first) || (view_known() && g.viewed.contains(&first))
+        })
     };
     if !known && !is_view(start, end) {
         return None;
     }
     install();
+    let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
+    // Asked before the lock is taken (`absent_ends`).
+    let ends = absent_ends(first, last);
     let mut g = guards();
     let mut written = Vec::new();
-    let (first, last) = (start / BLOCK, end.div_ceil(BLOCK));
     // Large heaps are usually clean. Walk only gaps between clean runs.
     let mut uncommitted_until = first;
     for (from, to) in g.clean.uncovered(first, last) {
@@ -812,11 +910,18 @@ fn guard(start: usize, end: usize) -> Option<Vec<usize>> {
                 // Ordinary commits need no runtime mapping notification. Reuse
                 // this asking's query for the following blocks in the same region.
                 if block >= uncommitted_until {
-                    uncommitted_until = uncommitted_end(block);
+                    // The answer asked before the lock for the region
+                    // holding this block, else asked now.
+                    let i = ends.partition_point(|&(b, _)| b <= block);
+                    uncommitted_until = match i.checked_sub(1).map(|i| ends[i]) {
+                        Some((b, e)) if b == block || (b < block && block < e) => e.max(block),
+                        _ => uncommitted_end(block),
+                    };
                 }
                 open = block >= uncommitted_until;
                 if open {
                     g.absent.remove(&block);
+                    known_sync(&g, block, block + 1);
                 }
             }
             if open {
@@ -955,6 +1060,7 @@ fn protect_alias(g: &mut Guards, block: usize) {
         if view_known() {
             g.viewed.insert(block);
         }
+        known_sync(g, block, block + 1);
     }
 }
 
@@ -979,6 +1085,7 @@ fn protect_here(g: &mut Guards, from: usize, to: usize) {
         if view_known() {
             g.viewed.extend(from..to);
         }
+        known_sync(g, from, to);
     };
     if set(from, to) {
         note(g, from, to);
@@ -992,6 +1099,7 @@ fn protect_here(g: &mut Guards, from: usize, to: usize) {
             let error = std::io::Error::last_os_error();
             if block < uncommitted_end(block) {
                 g.absent.insert(block);
+                known_sync(g, block, block + 1);
             } else {
                 // Diagnostics: a committed block that will not be made
                 // read-only is reported written at every asking and never
@@ -1059,6 +1167,7 @@ fn open_here(g: &mut Guards, start: usize, end: usize) -> bool {
     for &block in &blocks {
         g.protected.remove(&block);
         g.clean.remove(block);
+        known_sync(g, block, block + 1);
         let mut old = 0;
         // SAFETY: a block we made read-only.
         unsafe { VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) };
@@ -1420,6 +1529,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
         // (run 235: 266 to 565 failed askings a frame with the blocks
         // remembered from their guards alone, no fewer than without).
         g.viewed.extend(at / BLOCK..at.saturating_add(len).div_ceil(BLOCK));
+        known_sync(&g, at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
         return;
     }
     // What the range shows is new: no longer known to be a view.
@@ -1427,6 +1537,7 @@ pub fn title_memory_remapped(at: usize, len: usize) {
     for block in viewed {
         g.viewed.remove(&block);
     }
+    known_sync(&g, at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
 }
 
 /// Registers the handler that takes writes to guarded blocks, once, ahead
