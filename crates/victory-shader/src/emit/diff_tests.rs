@@ -668,13 +668,22 @@ fn tools_in(kits: &Path, env_path: impl Fn(&str) -> Option<PathBuf>) -> Option<(
 
 #[test]
 fn pc_compiler_prefers_sdk_and_supports_standalone_dxc() {
-    let dir = tempfile::tempdir().unwrap();
-    let kits = dir.path().join("bin");
+    let pid = std::process::id();
+    let mut attempt = 0u32;
+    let dir = loop {
+        let path = std::env::temp_dir().join(format!("victory-pc-compiler-{pid}-{attempt}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => break path,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+            Err(err) => panic!("could not create {}: {err}", path.display()),
+        }
+    };
+    let kits = dir.join("bin");
     let sdk = kits.join("10.0.26100.0").join("x64");
     std::fs::create_dir_all(&sdk).unwrap();
-    let console = dir.path().join("console.exe");
-    let validator = dir.path().join("dxil.dll");
-    let explicit_pc = dir.path().join("dxc.exe");
+    let console = dir.join("console.exe");
+    let validator = dir.join("dxil.dll");
+    let explicit_pc = dir.join("dxc.exe");
     let sdk_pc = sdk.join("dxc.exe");
     for path in [&console, &validator, &explicit_pc, &sdk_pc] {
         std::fs::write(path, []).unwrap();
@@ -688,13 +697,14 @@ fn pc_compiler_prefers_sdk_and_supports_standalone_dxc() {
         })
     };
     assert_eq!(locate(None), Some((console.clone(), sdk_pc.clone())));
-    assert_eq!(locate(Some(&dir.path().join("missing.exe"))), None);
+    assert_eq!(locate(Some(&dir.join("missing.exe"))), None);
     assert_eq!(
         locate(Some(&explicit_pc)),
         Some((console.clone(), explicit_pc.clone()))
     );
     std::fs::remove_file(sdk_pc).unwrap();
     assert_eq!(locate(None), Some((console, explicit_pc)));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 fn compile(dxc: &Path, dir: &Path, src: &str, entry: &str, profile: &str) -> Vec<u8> {
