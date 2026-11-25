@@ -620,6 +620,10 @@ impl CleanBlocks {
         }
     }
 
+    fn contains(&self, block: &usize) -> bool {
+        self.0.range(..=*block).next_back().is_some_and(|(_, &end)| *block < end)
+    }
+
     fn uncovered(&self, from: usize, to: usize) -> Vec<(usize, usize)> {
         let mut next = self.0.range(..=from).next_back().map_or(from, |(_, &end)| from.max(end));
         let mut missing = Vec::new();
