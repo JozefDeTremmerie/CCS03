@@ -1528,6 +1528,8 @@ fn v_ldexp_f32_scales_by_any_exponent() {
     run_cases(&shader, &[[0x7fc0_0000, 10, 0, 0]], |backend, _, _, got| {
         assert!(f32::from_bits(got).is_nan(), "{backend}: {got:#010x}");
     });
+}
+
 #[test]
 fn v_cvt_f32_f64_matches_ieee754() {
     // v_cvt_f32_f64 v0, v[1:2] (VOP1 opcode 0x00f -> VOP3 opcode 0x18f).
