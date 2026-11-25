@@ -110,6 +110,9 @@ Windows 11, or compare against `ccs03` as the maintainers do.
   x64, a CPU with AVX2, a Direct3D 12 GPU with shader model 6.6 (and mesh
   shaders for the world), and Rust as pinned in `rust-toolchain.toml`. On
   Windows 10 also the `D3D12` folder described above.
+- GPU: the high-performance card is used (on a laptop the NVIDIA or AMD
+  card, not the one in the processor); `VICTORY_D3D12_ADAPTER=<index|name>`
+  picks another, and the log names the one in use.
 - Display size: the title is told about a 1080p display;
   `VICTORY_DISPLAY_MODE=3840x2160` reports a 4K one (more memory).
 - Running, environment variables and architecture: see
