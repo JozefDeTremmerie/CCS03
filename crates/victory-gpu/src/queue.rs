@@ -75,6 +75,54 @@ enum Held {
 #[cfg(windows)]
 static PRESENTS_HELD: AtomicU64 = AtomicU64::new(0);
 
+/// Presents that waited [`held_present_ran`]'s whole wait in vain.
+#[cfg(windows)]
+static PRESENT_WAITS_OUT: AtomicU64 = AtomicU64::new(0);
+
+/// Told when a held present has run ([`PRESENTS_HELD`] went down).
+#[cfg(windows)]
+static PRESENT_RAN: (std::sync::Mutex<()>, std::sync::Condvar) = (std::sync::Mutex::new(()), std::sync::Condvar::new());
+
+/// With [`present_behind`]: whether the present before this one has run,
+/// waiting for it up to `VICTORY_ASYNC_PRESENT_WAIT_MS` (250 by default; 0:
+/// not waited for).
+///
+/// A present that found the one before it still in the line ran the old
+/// way: the title's thread ran the queues' lines itself, holding the
+/// releaser's lock, while our thread stood waiting for that lock, and the
+/// frame after it began with an empty line. So only every other frame went
+/// behind (the frame log's pairs of a 3 ms and a 290 ms frame; the sampling
+/// profiler, 25 November: our submitting thread 46 ms a frame waiting for
+/// that lock, 27 ms with nothing to do). The title waits instead until our
+/// thread has shown the frame before, as the console's flip queue holds a
+/// title one frame ahead, and its present then goes behind too. Past the
+/// wait (a line that stands at a fence or a memory value only the title
+/// will meet) it runs the old way, which forces the line.
+#[cfg(windows)]
+fn held_present_ran() -> bool {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *MS.get_or_init(|| {
+        std::env::var("VICTORY_ASYNC_PRESENT_WAIT_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(250)
+    });
+    if PRESENTS_HELD.load(Ordering::Relaxed) == 0 {
+        return true;
+    }
+    if ms == 0 {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    let mut ran = lock(&PRESENT_RAN.0);
+    while PRESENTS_HELD.load(Ordering::Relaxed) != 0 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            PRESENT_WAITS_OUT.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        ran = PRESENT_RAN.1.wait_timeout(ran, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    true
+}
+
 /// Whether a present goes behind the queue's line and returns at once
 /// (`VICTORY_ASYNC_PRESENT=1`; needs [`behind`] and presents that do not
 /// settle the flights, `crate::host::late_free_present`).
@@ -123,7 +171,7 @@ fn send_behind(this: This, planes: u32, plane_parameters: *const Plane) -> bool 
     // A second plane (the interface, in the title's Series S mode) goes
     // with the present and is drawn over the first when it runs
     // (`crate::over`), as in place. More than two: run in place.
-    if this.is_null() || planes == 0 || planes > 2 || PRESENTS_HELD.load(Ordering::Relaxed) != 0 {
+    if this.is_null() || planes == 0 || planes > 2 || !held_present_ran() {
         return false;
     }
     let frame = FRAMES.load(Ordering::Relaxed) + 1;
@@ -670,6 +718,8 @@ fn release_held_now(all: bool) {
                             }
                         }
                         PRESENTS_HELD.fetch_sub(1, Ordering::Relaxed);
+                        let _told = lock(&PRESENT_RAN.0);
+                        PRESENT_RAN.1.notify_all();
                     }
                     // Behind what was sent to the card and not waited
                     // for, if anything was.
@@ -1096,6 +1146,7 @@ fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESU
         tracing::info!(
             frame,
             behind = PRESENTS_BEHIND.load(Ordering::Relaxed),
+            waited_in_vain = PRESENT_WAITS_OUT.load(Ordering::Relaxed),
             "presents sent behind their queue's line so far (VICTORY_ASYNC_PRESENT=1); the others ran the old way"
         );
     }
