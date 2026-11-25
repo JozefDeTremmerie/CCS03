@@ -127,9 +127,15 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                     .windows(crate::ambient::PROGRAM.len())
                     .any(|w| w == crate::ambient::PROGRAM),
                 #[cfg(windows)]
-                updates_reflections: bytes
-                    .windows(crate::reflect::PROGRAM.len())
-                    .any(|w| w == crate::reflect::PROGRAM),
+                updates_reflections: {
+                    let found = bytes
+                        .windows(crate::reflect::PROGRAM.len())
+                        .any(|w| w == crate::reflect::PROGRAM);
+                    if found {
+                        tracing::info!(stage, hash = %&full.to_hex()[..16], "reflection knee: a history pass");
+                    }
+                    found
+                },
                 #[cfg(windows)]
                 translated: OnceLock::new(),
                 #[cfg(windows)]

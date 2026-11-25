@@ -2376,6 +2376,41 @@ impl State {
         let Some(stage) = p.stages.first().filter(|s| s.shader.updates_reflections) else {
             return false;
         };
+        // Each program of that name once: what it writes through tables, so
+        // that the reflection image can be told apart if it is elsewhere.
+        {
+            static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if seen.len() < 16 && !seen.contains(&stage.shader.hash) {
+                seen.push(stage.shader.hash.clone());
+                let writes: Vec<String> = stage
+                    .translated()
+                    .used
+                    .iter()
+                    .filter(|u| u.kind == ResourceType::Uav)
+                    .map(|u| {
+                        let format = (u.root == RootType::Table)
+                            .then(|| self.roots_ref(true).get(usize::from(u.slot)))
+                            .flatten()
+                            .and_then(|r| match r {
+                                Root::Table(t) => Some(*t),
+                                _ => None,
+                            })
+                            .and_then(|t| crate::descriptor::view(t + u64::from(u.table_offset_dwords) * 4))
+                            .and_then(|v| match v {
+                                View::Unordered(r, ..) if r != 0 => crate::resource::host_resource(r as This),
+                                _ => None,
+                            })
+                            // SAFETY: a live resource.
+                            .map(|t| unsafe { t.GetDesc() })
+                            .map(|d| format!("{}x{} format {}", d.Width, d.Height, d.Format.0))
+                            .unwrap_or_else(|| "-".to_owned());
+                        format!("{:?} {}/{}: {format}", u.root, u.slot, u.table_offset_dwords)
+                    })
+                    .collect();
+                tracing::info!(hash = %stage.shader.hash, ?writes, "reflection knee: a history pass writes");
+            }
+        }
         let (slot, offset) = crate::reflect::IMAGE;
         let Some(u) = stage.translated().used.iter().find(|u| {
             u.kind == ResourceType::Uav
@@ -2385,11 +2420,15 @@ impl State {
             return false;
         };
         let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(u.slot)) else {
+            once!("reflection knee: the history pass's table is not bound");
             return false;
         };
         match crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4) {
             Some(View::Unordered(r, ..)) if r != 0 => crate::reflect::bend(list, r as This),
-            _ => false,
+            _ => {
+                once!("reflection knee: no image in the history pass's slot");
+                false
+            }
         }
     }
 
