@@ -255,6 +255,10 @@ struct Lower<'a> {
     /// With `exchange`: VGPR values every lane holds alike ([`lane_uniform`]); a first-lane
     /// read of one needs nothing from the other host wave.
     uniform: HashSet<Value>,
+    /// With `exchange`: what the two host waves of a console wave hold alike
+    /// ([`super::coherent`]); a first-lane read of such a value, where the console wave's
+    /// lanes run together, needs nothing from the other host wave.
+    coherent: super::coherent::Coherence,
     /// With `exchange`: the wave ORs that only steer a loop over each lane's own bits, which
     /// a host wave takes over its own lanes wherever they stand ([`super::own_bits`]).
     own_bits: super::own_bits::OwnBits,
@@ -283,6 +287,8 @@ struct Lower<'a> {
     def_block: HashMap<Value, usize>,
     /// IR block being lowered.
     cur_ir: usize,
+    /// The instruction of `cur_ir` being lowered.
+    cur_i: usize,
     /// Whole-wave sections by block and start index.
     sections: HashMap<usize, HashMap<usize, super::wave::Section>>,
     /// Values written in a section that code outside it reads.
@@ -352,7 +358,7 @@ fn all_lane_blocks(st: &Structured) -> Option<Vec<bool>> {
 /// Every per-lane branch (by its block) with its region: the blocks reachable from it that do
 /// not post-dominate it, which only some lanes run. Not the branches the wave takes together
 /// ([`Structured::wide`]), nor those on scalar conditions. None with an indirect exit.
-fn lane_regions(st: &Structured) -> Option<Vec<(usize, Vec<bool>)>> {
+pub(super) fn lane_regions(st: &Structured) -> Option<Vec<(usize, Vec<bool>)>> {
     let n = st.exits.len();
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (b, e) in st.exits.iter().enumerate() {
@@ -1510,6 +1516,12 @@ impl<'a> Lower<'a> {
                 Some((_, false, all)) if !LOCAL_WAVES.get() => lane_uniform(p, x.st, all),
                 _ => HashSet::new(),
             },
+            coherent: match (&exchange, &x.native.io) {
+                (Some((_, false, _)), StageIo::Cs(cs)) if !LOCAL_WAVES.get() => {
+                    super::coherent::coherence(p, x.st, x.io, cs.threads)
+                }
+                _ => Default::default(),
+            },
             own_bits: match &exchange {
                 Some((_, false, _)) if !LOCAL_WAVES.get() && own_bits_on() => {
                     super::own_bits::find(p, x.st, std::env::var_os("VICTORY_WAVE_WHY").is_some())
@@ -1546,6 +1558,7 @@ impl<'a> Lower<'a> {
                 })
                 .collect(),
             cur_ir: 0,
+            cur_i: 0,
             sections: HashMap::new(),
             section_out: HashSet::new(),
             code_table: None,
@@ -4668,6 +4681,7 @@ impl<'a> Lower<'a> {
 
     fn inst(&mut self, b: usize, i: usize) -> Result<(), Stop> {
         let inst: &'a Inst = &self.x.p.blocks[b].insts[i];
+        self.cur_i = i;
         let offset = inst.machine.offset;
         let name = inst.name();
         self.local_ok = name.starts_with("s_bcnt1_i32_")
@@ -7385,9 +7399,11 @@ impl<'a> Lower<'a> {
                 // two host waves that exchange: the console's first lane may be in the other
                 // one, unless every lane holds the same value
                 let alike = match v.src.first() {
-                    Some(&Operand::Vector { reg, .. }) => {
-                        inst.read(Reg::V(reg)).is_some_and(|x| self.uniform.contains(&x))
-                    }
+                    Some(&Operand::Vector { reg, .. }) => inst.read(Reg::V(reg)).is_some_and(|x| {
+                        self.uniform.contains(&x)
+                            || (self.coherent.value(x)
+                                && self.coherent.runs_together(self.x.st, self.cur_ir, self.cur_i))
+                    }),
                     _ => true,
                 };
                 let halves = self.exchange.as_ref().is_some_and(|e| !e.1) && !self.local;

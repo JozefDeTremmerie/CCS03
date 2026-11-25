@@ -81,6 +81,7 @@
 //!   It binds nothing.
 
 mod bitcode;
+mod coherent;
 mod container;
 #[cfg(all(test, windows))]
 mod diff_tests;
