@@ -171,6 +171,7 @@ pub(crate) fn draw(host: &crate::host::Host, list: &ID3D12GraphicsCommandList, b
         made.clear();
     }
     let key = (tenths, format.0, scale);
+    #[allow(clippy::map_entry)] // the entry is made only if a buffer can be had
     if !made.contains_key(&key) {
         let (w, h, lit) = bitmap(&text(tenths), scale);
         let pitch = (w as usize * bytes).next_multiple_of(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT as usize);

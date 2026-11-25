@@ -552,7 +552,7 @@ fn ask_unlocked(found: &mut Vec<usize>, first: usize, last: usize, guarded: bool
 fn failed_asking(start: usize, end: usize) {
     use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 2048 != 0 {
+    if !N.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(2048) {
         return;
     }
     // SAFETY: plain data filled in by the query.
@@ -675,6 +675,12 @@ impl CleanBlocks {
             to = to.max(end);
         }
         self.0.insert(from, to);
+    }
+
+    /// Whether `block` lies in one of the runs (as `BTreeSet::contains`
+    /// answered before the runs, for the callers that ask of one block).
+    fn contains(&self, block: &usize) -> bool {
+        self.0.range(..=*block).next_back().is_some_and(|(_, &end)| *block < end)
     }
 
     fn remove(&mut self, block: usize) {
@@ -993,7 +999,7 @@ fn protect_here(g: &mut Guards, from: usize, to: usize) {
                 #[cfg(feature = "diagnostics")]
                 {
                     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 1024 == 0 {
+                    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(1024) {
                         tracing::info!("a block of title memory could not be made read-only (one in 1024): {:#x}: {error}", block * BLOCK);
                     }
                 }
