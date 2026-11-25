@@ -1831,6 +1831,9 @@ mod title_memory_tests {
                 judged: [const { AtomicU64::new(0) }; 2],
                 waiting: AtomicU64::new(0),
                 pooled,
+                gpu_detile: None,
+                drop: 0,
+                changes: AtomicU32::new(0),
             };
             let expected = || {
                 let mut linear = vec![0u8; total as usize];
