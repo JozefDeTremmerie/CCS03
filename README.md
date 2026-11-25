@@ -14,14 +14,18 @@ title you need your own copy.
 
 ## What CCS03 adds
 
-- Reviewed pull requests from victory-fork and VIctory, and fixes of our
-  own. Each one is checked first: is it already in the base, does
-  victory-fork already solve it another way, do reviewers report problems,
-  and does the whole test suite pass on Windows with an NVIDIA GPU (32-lane
-  waves). The list, with authors, is in [CCS03.md](CCS03.md).
-- A focus on NVIDIA and Windows 10. CCS03 tests on NVIDIA cards, which run
-  32-lane waves and often have 8 GB of memory, and runs on Windows 10
-  through the DirectX 12 Agility SDK (see below).
+- Reviewed pull requests from victory-fork, VIctory, ZETTROX and
+  Belobug's fork, and fixes of our own. Each one is checked first: is it
+  already in the base, does victory-fork already solve it another way, do
+  reviewers report problems, and does the whole test suite pass on Windows
+  with an NVIDIA GPU (32-lane waves). The list, with authors, is in
+  [CCS03.md](CCS03.md).
+- A focus on NVIDIA cards with 8 GB and on laptops. The title's Series S
+  profile runs with its own upscaler and interface plane, large textures
+  leave out their largest level when the card's memory is small, the
+  high-performance GPU of a laptop is used, and the title's missing
+  ray-traced light is stood in for by a constant.
+- Windows 10 through the DirectX 12 Agility SDK (see below).
 - Tooling for contributors. One script sets up a clone and one runs the
   tests and Clippy as the CI does. A commit hook keeps game data out of the
   history, and [AGENTS.md](AGENTS.md) gives people and AI agents the same
@@ -29,55 +33,82 @@ title you need your own copy.
 
 ## Status
 
-CCS03 follows victory-fork `main` (base `4e17478`). victory-fork's README
-describes the title on its test machine (Windows 11, RTX 4070 12 GB). What
-follows is what CCS03 itself has seen.
+CCS03 follows victory-fork `main` (base `0b0074e`, the frame-rate work of 25
+November). What follows is what CCS03 itself has seen.
 
-### Test run of 2026-11-25
+### Test run of 2026-11-25, afternoon: Series S on an 8 GB laptop
 
-Build: `ccs03` at `55a691f`, release build, Series X profile, default
-settings (the title is told about a 1080p display).
+Build: `ccs03` at `c060848`, release build, `--console series-s`, a 1080p
+display, the switches under "Running" below.
 
-Machine: Windows 10 22H2 (19045), Ryzen 5 3600, GeForce RTX 2060 SUPER 8 GB
-(driver 621.01, PCIe 3.0 x16), 16 GB RAM with a 17.6 GB page file, DirectX
-12 Agility SDK 1.614.1.
+Machine: a laptop with a GeForce RTX 4060 Laptop GPU (8 GB) and a Ryzen 9
+7845HX.
 
-**Not playable yet: 1 to 3 frames per second in the world, and most of
-what is not lit directly is black.**
+**Still not fully playable, but the first rooms look close to the
+console: 3 to 6 frames a second.**
 
 | Stage | What we saw |
 |-------|-------------|
-| Boot, menus, loading screen | 30 fps, as upstream |
-| Loading into the story | about 7.5 minutes on the loading screen (longer on the very first run, while the shaders are translated) |
-| Opening cutscene | plays in order: credits text, a night exterior, a dark interior, a daytime road with characters and vehicles |
-| Frame rate in the world | 1 to 3 fps; 316 ms to 3 s per frame, median about 835 ms. Per frame: 100 to 490 ms on the GPU, 130 to 310 ms preparing (copies and textures), 80 to 135 ms copying back |
-| Stability | 13 minutes without a crash, a hang or a device removal |
+| Boot, menus, loading screen | 30 fps |
+| The cell and the first rooms | lit, with textures on walls, beds and posters, characters with skin, faces and hair, the yard and the guard tower through the window; 3 to 6 fps, 170 to 350 ms a frame, the card busy only 30 to 100 ms of it |
+| Cutscenes | play in order; the first seconds of a new one run at about 1 frame a second while its textures stream in, and faces stay dark until theirs are there |
+| Stability | no crash, out-of-memory or device removal in five runs of 3 to 35 minutes |
 
-Problems seen in that run:
+What changed since the morning (same day, RTX 2060 SUPER 8 GB, Series X
+profile: 1 to 3 fps, most of what was not lit directly black, textures
+blurry or missing):
 
-- Ground, vehicles and characters out of direct light are black or nearly
-  black (the title's ray-traced light is not there yet, as in victory-fork).
-- In the daytime shots, black boxes float in the sky and over the distance,
-  a vertical band of the sky is shaded differently from the rest, and some
-  vehicle surfaces are plain white.
-- Textures turn blurry once the card's 8 GB are full ("the card has no
-  room for more"), even at 1080p.
-- The driver refuses 4 compute pipelines: they need 64-lane waves and NVIDIA
-  cards have 32. 6 compute shaders do not translate.
-- The diagnostics build (`--features diagnostics`) crashed twice where the
-  world begins, in the title's own code (a write to address 0); the release
-  build does not. Being looked into.
+- The Series S profile: the title renders inside at 1280x720 and keeps its
+  own upscaler (victory-fork #798), its interface plane is drawn (#188).
+  About twice the frame rate of Series X on the same card, and it fits 8 GB.
+- victory-fork's frame-rate work of 25 November with its switches on: from
+  about 4 to 6 fps on the laptop.
+- Textures without their largest level on 8 GB cards (from victory-fork
+  #814): before, about 450 textures waited for room on the card and figures
+  and objects were white.
+- A constant for the ray-traced indirect light (from Belobug's fork): what
+  the sun does not reach is no longer black.
+- 50 more shader programs translate (victory-fork #25 and #215): cascade
+  shadows and characters' cut-out clothing and hair.
+
+Still open:
+
+- The processor side is the limit: one submit thread spends about 130 ms a
+  frame preparing, 80 ms copying the title's memory to the card and 60 ms
+  copying back (measured with victory-fork's frame log).
+- Faces in a cutscene's first seconds, and dark scenes.
+- Ray tracing: victory-fork #814 runs live ray-traced light on 8 GB cards,
+  at about 1 frame a second; not in CCS03.
+- 9 of the title's programs: 5 ray-traced shadow programs, 2 water volume
+  programs, 1 tiled cascade-shadow program and 1 voxelisation program; and 3
+  compute pipelines the driver refuses (they need 64-lane waves).
 
 ### All the title's shaders on the same card
 
-`victory translate --validate --pipelines` over the title's shader pack, as
-for a host with 32-lane waves: all 26,148 programs translate; of the 14,259
-vertex and pixel programs 14,168 become DXIL and 14,057 pass DXC's
-validator. The largest groups left are geometry programs that read an
-address no root parameter holds (195), mesh programs whose output is over
-the PC's 32 KB limit (71), input and output signatures the validator
-rejects (72), descriptors read as data or chosen by control flow (80) and
-compute programs that need 64-lane waves (23).
+`victory translate` over the title's shader pack and executable, as for a
+host with 32-lane waves and a 1,000,000-view heap: all 26,096 programs
+translate; 14,258 of 14,259 vertex and pixel programs, 2,674 of 2,682
+compute programs and all 8,765 mesh programs become DXIL. The 195 geometry
+programs that read an address no root parameter holds are not lowered by
+`translate`.
+
+### Running
+
+The recommended way on an 8 GB card, as a set of environment variables:
+
+```
+VICTORY_DISPLAY_MODE=1920x1080
+VICTORY_RELAY=2 VICTORY_ASYNC_SUBMIT=1 VICTORY_QUEUE2=1 VICTORY_INDIRECT_WINDOW=1
+VICTORY_COPY_PLAIN=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_WIDE_TEXTURES=1
+VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_TEXTURE_ROOM_PERCENT=86
+VICTORY_CARD_ROOM_FOR_TARGETS_MB=1024 VICTORY_CARD_BUFFERS_MB=768 VICTORY_AMBIENT=0.9
+victory.exe run <game folder>\game_scarlett_master.exe --execute --console series-s
+```
+
+A shader and pipeline cache per PC (`VICTORY_CACHE_DIR`) keeps two
+machines with different cards from rebuilding each other's pipelines.
+Without the Series S profile, an 8 GB card runs out of memory in the world
+at 1080p; `VICTORY_DISPLAY_MODE=1280x720` keeps it inside.
 
 ### Earlier base
 
@@ -115,6 +146,8 @@ Windows 11, or compare against `ccs03` as the maintainers do.
   picks another, and the log names the one in use.
 - Display size: the title is told about a 1080p display;
   `VICTORY_DISPLAY_MODE=3840x2160` reports a 4K one (more memory).
+- Console profile: `--console series-s` for cards with 8 GB (see Running
+  above); the Series X profile renders at 2560x1440 inside.
 - Running, environment variables and architecture: see
   [victory-fork's README](https://github.com/fxceless/victory-fork#readme),
   [VIctory's README](https://github.com/Marvisak/VIctory#readme) and

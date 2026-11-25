@@ -5,9 +5,9 @@ fxceless and its contributors, which is itself a fork of
 [VIctory](https://github.com/Marvisak/VIctory). victory-fork carries a large
 amount of rendering, lighting, frame-rate and memory work on top of VIctory,
 so CCS03 starts from there and adds its own work and reviewed pull requests
-on top.
+on top, also from other forks (ZETTROX, Belobug's fork).
 
-Base: victory-fork `main` at `4e17478` (on VIctory `main` at `ffe310e`); victory-fork's later commits on `main` change nothing (a change taken out and put back).
+Base: victory-fork `main` at `0b0074e` (25 November: the frame-rate work, merged in CCS03 PR 27; before that `9376fd6` in CCS03 PR 19).
 
 Every change that comes into `ccs03` is checked first: is it already in the
 base, does victory-fork already solve the same problem another way, do
@@ -29,6 +29,16 @@ Windows with an NVIDIA GPU (32-lane waves).
 | CCS03 PR 13: no blending on integer render targets (the driver refused a mesh pipeline over it) | 9hvn9yt2vk-netizen |
 | CCS03 PR 14: the capture folder is made before frames are saved | 9hvn9yt2vk-netizen |
 | CCS03 PR 15: `v_ldexp_f32`, `v_frexp_mant_f32` and `v_frexp_exp_i32_f32` (CCS03 PR 1 of the previous base, again) | 9hvn9yt2vk-netizen |
+| CCS03 PR 18: first-lane reads alike in a console wave need no exchange on 32-lane hosts | 9hvn9yt2vk-netizen |
+| CCS03 PR 19: victory-fork `main` at `9376fd6` (the first room renders right); `v_cvt_f32_f64` keeps CCS03 PR 8's lowering, victory-fork's tests check it too | fxceless and contributors; merge CCS03 |
+| CCS03 PR 20: the high-performance GPU on laptops, `VICTORY_D3D12_ADAPTER` (victory-fork PR 261) | xADEL |
+| CCS03 PR 21: from ZETTROX's open pull requests: shader signature elements sorted by slot with PSV0 interpolation (#60), `v_permlane16_b32` and `v_permlanex16_b32` (#49), no colour codes in log files (#12), no multisampled linear textures (#14, VIctory PR 629) | IAmTheSween, Altorru, God489, AlanQiang0418 |
+| CCS03 PR 22: the tests compile and Clippy is clean after PRs 19 to 21 | CCS03 |
+| CCS03 PR 24: a constant for the ray-traced indirect light while rays do not run (`VICTORY_AMBIENT`, from Belobug's fork) | beloooo |
+| CCS03 PR 25: the Series S profile: the title's own upscaler (victory-fork PR 798), the interface plane and the upscale stretch (PR 188), texture checks several at a time (PR 768) | KyleS98, sagouindupm, Filip722 |
+| CCS03 PR 26: immediate samplers chosen by control flow (victory-fork PR 25, 40 programs among them cascade shadows) and the ordered pixel section as rasterizer-ordered views (PR 215, 10 programs); CCS03's own lowering moved to `lower_ccs03.rs` for the policy's size limit | Noname0202, arminkhaleghirod; CCS03 |
+| CCS03 PR 27: victory-fork `main` at `0b0074e` (submit thread, copy queue, draw windows, copies in place, frame log) and its PR 823 (64-lane compute programs NVIDIA refused, page-mapping copies as one view) | fxceless, Felix2180 |
+| CCS03 PR 28: textures without their largest levels on 8 GB cards (`VICTORY_TEXTURE_DROP_MIPS`, from victory-fork PR 814); the indirect budget test no longer asks which draws win | staronthehorizon; CCS03 |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
 of the title and the technical details. When merging victory-fork `main`,
