@@ -50,10 +50,10 @@ of 8 GB, on a laptop (GeForce RTX 4060 Laptop GPU, Ryzen 9 7845HX):
 | Loads and boots | yes: logos, account picker and loading screens |
 | Main menu | yes, at 30 fps |
 | In the world | yes: the opening cutscene (the diner) plays with sound, characters and room lit |
-| Playable | yes, slowly: in Lucia's prologue the game hands over control and the player walks the cell and the prison yard and turns the camera, with a pad or the keyboard |
-| Frame rate | 30 fps in the menus; 1 to 3 fps in the opening cutscene (slowest in its first minutes while textures stream onto the 8 GB card); 3 to 7.6 fps in the prison (130 to 300 ms a frame, 3,400 to 6,000 draws) |
-| Stability | runs of 2.5 to 11 minutes, each closed by us: no crash, out-of-memory or device removal |
-| Story | the start of Lucia's prologue; nothing further tried yet |
+| Playable | yes, slowly: the player walks Lucia through the cell, the prison yard and the prologue's later scenes, and steers Jason's boat, with an Xbox pad, a PlayStation 5 pad (read by CCS03 itself, no helper program) or the keyboard |
+| Frame rate | 30 fps in the menus; 1 to 3 fps in the opening cutscene (slowest in its first minutes while textures stream onto the 8 GB card); 3 to 7.8 fps in the prison and on the water (127 to 300 ms a frame, 3,400 to 6,000 draws) |
+| Stability | runs of 2.5 to 22.5 minutes, each closed by us: no crash, out-of-memory or device removal |
+| Story | Lucia's prologue played through to chapter 1, and on into Jason's first mission (the boat, following the plane); that mission fails so far ("Cal fell off the boat"): the water is drawn through the boat, and the boat is hard to steer at 3 to 8 fps |
 
 Videos of the laptop runs of 25 November:
 [run 1](https://youtu.be/aDwAmX76wsc) and
@@ -71,7 +71,7 @@ the title's ray-traced light is missing, quad reads for pixel quads, and
 ### Test runs of 2026-11-25, evening: in control of the character
 
 Build: `ccs03` with victory-fork `d510ee4` merged, release and diagnostics
-builds, `--console series-s` (and once `series-x`), a 1080p display, the
+builds, `--console series-s`, a 1080p display, the
 switches under "Running" below.
 
 Machine: the same laptop, GeForce RTX 4060 Laptop GPU (8 GB), Ryzen 9
@@ -91,14 +91,46 @@ prison yard with a pad or the keyboard, at 5.5 to 7.6 frames a second.**
 
 Seen and still open in the picture:
 
-- Series S: white speckles on skin in close-ups; the same shot with
-  `--console series-x` is clean, so it comes from the Series S path.
+- White speckles on skin where a lamp lights a face in close-up; other
+  close-ups in the same runs are clean.
 - The yard in sunlight is washed out: the constant that stands in for the
   ray-traced indirect light adds to reflections of the open sky.
 - Some tattooed arms are drawn black with blue lines.
 - At startup the title asks two console device methods (`0x1c8`, about
   16,000 calls, and `0x218`, about 2,000) for pipelines; neither is
   written yet anywhere, so the title goes without those pipelines.
+
+### Later the same evening: further into the story
+
+Build: the branch of this update (CCS03's `ccs03` with the reflection knee,
+PlayStation 5 pads and the names of failing programs in the log), same
+laptop, `--console series-s`.
+
+- Lucia's prologue played through to chapter 1, then Jason's first
+  mission: in the boat, following the plane, until the mission failed.
+  Two runs of 13.5 and 22.5 minutes, closed by us, no crash.
+- A PlayStation 5 pad on USB is found and plays as the first pad;
+  sticks, buttons and both triggers read right (the log lists the first
+  presses with the report's bytes).
+- The reflection knee runs after the title's history pass for its
+  reflections (`CS_UpdateHistory`, which the title also dispatches
+  indirectly).
+- With the texture pass held to 25 ms and 48 MB a frame
+  (`VICTORY_TEXTURE_STAGE_MS=25 VICTORY_TEXTURE_STAGE_MB=48
+  VICTORY_TEXTURE_CATCHUP=0`) the world runs at 6.3 to 7.0 fps with fewer
+  stalls; a new scene shows its background bright for longer while its
+  textures come in. On the water, `VICTORY_WIDE_REFRESH=1` took the
+  copies of title memory from 60-210 to 38-95 ms a frame and the time the
+  card waits for us from 120-185 to 56-70 ms; the frame rate stayed at 5.5
+  to 7.8.
+- The four programs that fail, by the title's own names: 
+  `CS_TransmissionVolumetricsSubmerged` does not translate (a lane mask
+  holding lanes elsewhere read as data, in a console wave64 program on
+  NVIDIA's 32-lane waves); the driver refuses
+  `CS_AlphTransmissionPrefilterMip`, `CS_CollectTriangles_Meshlets` and
+  `CS_DefragHeap_ComputeRelocations`.
+- Still open in the picture: the water drawn through Jason's boat, black
+  blocks on the water, people and objects black against a bright sky.
 
 ### Test run of 2026-11-25, afternoon: Series S on an 8 GB laptop
 
@@ -169,6 +201,18 @@ VICTORY_CARD_ROOM_FOR_TARGETS_MB=1024 VICTORY_CARD_BUFFERS_MB=768 VICTORY_AMBIEN
 VICTORY_JOIN_PARTS=1 VICTORY_BACK_OWN_VIEW=1 VICTORY_INDIRECT_GATHER=1 VICTORY_CARD_REHASH_RUNS=1
 victory.exe run <game folder>\game_scarlett_master.exe --execute --console series-s
 ```
+
+Or with the script that sets all of these and keeps each run's log and a
+short summary in a folder next to the repository:
+
+```
+powershell -ExecutionPolicy Bypass -File ccs03\play.ps1 -Title <game folder>\game_scarlett_master.exe
+```
+
+`-Smooth` holds the texture pass to 25 ms and 48 MB a frame (fewer stalls,
+textures come in over more frames), `-Fast` refreshes host copies on
+several threads, `-Low` uses a 1280x720 display and `-Diag` runs the
+diagnostics build, which logs why draws are dropped.
 
 A shader and pipeline cache per PC (`VICTORY_CACHE_DIR`) keeps two
 machines with different cards from rebuilding each other's pipelines.
