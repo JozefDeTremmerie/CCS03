@@ -129,8 +129,10 @@ laptop, `--console series-s`.
   NVIDIA's 32-lane waves; so does `CS_TransmissionVolumetrics`). Both
   are the Series S profile's own containers of programs victory-fork
   already lets take the wave-wide form; with their hashes on that list
-  the submerged one translates to 32-lane waves offline (not yet seen in
-  a run). The driver refuses
+  the submerged one translates to 32-lane waves, its pipeline is made and
+  the title runs it on the water (a run of 10 minutes, no device loss, the
+  same frame rate); the boat now sits on the water with its wake behind
+  it. Black blocks on the water are still there. The driver refuses
   `CS_AlphTransmissionPrefilterMip`, `CS_CollectTriangles_Meshlets` and
   `CS_DefragHeap_ComputeRelocations`.
 - Still open in the picture: the water drawn through Jason's boat, black
