@@ -16,7 +16,7 @@
 //!
 //! A texture's place is given back when its host copy goes, once the
 //! submissions running then have finished (`crate::host::retire`). A heap
-//! left empty is let go at a later call, one empty heap of each size kept.
+//! left empty is let go at a later call, a few kept.
 //! Textures over [`LARGEST`], with a clear value or another alignment are
 //! made as before.
 
@@ -31,8 +31,10 @@ use windows::core::Interface;
 const HEAP_BYTES: u64 = 16 << 20;
 /// The largest texture placed in a heap; larger ones are made as before.
 const LARGEST: u64 = 1 << 20;
-/// The smallest slot (a texture's own alignment).
+/// The smallest slot (a texture's own alignment); slots are whole grains.
 const GRAIN: u64 = 64 << 10;
+/// Empty heaps kept for textures to come.
+const EMPTY_KEPT: usize = 2;
 /// The most bytes of free slots in all heaps together before no new heap
 /// is made: past it, a texture with no free slot of its size is made as
 /// before, so that free slots never take the card's room from textures.
@@ -42,7 +44,7 @@ const SLACK_MOST: u64 = 256 << 20;
 /// alive, since the start.
 pub(crate) static STATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
-/// A heap of slots of one size (a power of two from [`GRAIN`] to
+/// A heap of slots of one size (whole grains, from [`GRAIN`] to
 /// [`LARGEST`]).
 ///
 /// One size a heap, and a texture goes into the fullest heap of its size
@@ -89,18 +91,21 @@ pub(crate) fn on() -> bool {
 
 impl Heaps {
     /// Lets go of heaps left empty at an earlier call (their last texture
-    /// is gone by now), keeping one empty heap of each size.
+    /// is gone by now), keeping [`EMPTY_KEPT`] of them.
     fn purge(&mut self) {
-        let mut kept: Vec<u64> = Vec::new();
+        let mut kept = 0;
         for entry in &mut self.list {
             let Some(heap) = entry else { continue };
             if heap.used == 0 && heap.empty_at.is_some_and(|at| at < self.calls) {
-                if kept.contains(&heap.size) {
-                    STATS[2].fetch_add(1, Relaxed);
-                    STATS[3].fetch_sub(HEAP_BYTES, Relaxed);
+                if kept >= EMPTY_KEPT {
+                    let gone = STATS[2].fetch_add(1, Relaxed) + 1;
+                    let alive = STATS[3].fetch_sub(HEAP_BYTES, Relaxed) - HEAP_BYTES;
+                    if gone.is_multiple_of(32) {
+                        tracing::info!(let_go = gone, alive_mb = alive >> 20, "texture heaps let go");
+                    }
                     *entry = None;
                 } else {
-                    kept.push(heap.size);
+                    kept += 1;
                 }
             }
         }
@@ -144,7 +149,10 @@ pub(crate) fn place(device: &ID3D12Device, desc: &D3D12_RESOURCE_DESC, state: D3
     if info.SizeInBytes == u64::MAX || info.SizeInBytes > LARGEST || info.Alignment > GRAIN {
         return None;
     }
-    let size = info.SizeInBytes.max(GRAIN).next_power_of_two();
+    // In whole grains, not powers of two: a texture of 600 KiB took a slot
+    // of 1 MiB, and the card held about 1 GB more than its textures, so it
+    // turned new ones down (283 passes, laptop run of 25 November, 1a2d180).
+    let size = info.SizeInBytes.max(GRAIN).next_multiple_of(GRAIN);
     let (index, slot, heap) = {
         let mut all = heaps();
         all.calls += 1;
@@ -159,7 +167,7 @@ pub(crate) fn place(device: &ID3D12Device, desc: &D3D12_RESOURCE_DESC, state: D3
                 let heap = make_heap(device)?;
                 let made_so_far = STATS[0].fetch_add(1, Relaxed) + 1;
                 let alive = STATS[3].fetch_add(HEAP_BYTES, Relaxed) + HEAP_BYTES;
-                if made_so_far.is_power_of_two() || made_so_far.is_multiple_of(256) {
+                if made_so_far.is_power_of_two() || made_so_far.is_multiple_of(32) {
                     tracing::info!(
                         made = made_so_far,
                         let_go = STATS[2].load(Relaxed),
