@@ -76,6 +76,10 @@ $env:VICTORY_JOIN_PARTS = '1'
 $env:VICTORY_BACK_OWN_VIEW = '1'
 $env:VICTORY_INDIRECT_GATHER = '1'
 $env:VICTORY_CARD_REHASH_RUNS = '1'
+# victory-fork PR 999: water textures the title reads on the CPU are copied
+# back (boats float); a hash as long as the title's buffer (the water right).
+$env:VICTORY_TEXTURE_BACK = '1'
+$env:VICTORY_CARD_HASH_LEN = '1'
 $env:NO_COLOR = '1'
 if ($Fast) { $env:VICTORY_WIDE_REFRESH = '1' }
 if ($Low) { $env:VICTORY_DISPLAY_MODE = '1280x720' }

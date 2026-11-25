@@ -205,8 +205,14 @@ VICTORY_COPY_PLAIN=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_WIDE_TEXTURES=1
 VICTORY_TEXTURE_DROP_MIPS=1 VICTORY_TEXTURE_ROOM_PERCENT=86
 VICTORY_CARD_ROOM_FOR_TARGETS_MB=1024 VICTORY_CARD_BUFFERS_MB=768 VICTORY_AMBIENT=0.9
 VICTORY_JOIN_PARTS=1 VICTORY_BACK_OWN_VIEW=1 VICTORY_INDIRECT_GATHER=1 VICTORY_CARD_REHASH_RUNS=1
+VICTORY_TEXTURE_BACK=1 VICTORY_CARD_HASH_LEN=1
 victory.exe run <game folder>\game_scarlett_master.exe --execute --console series-s
 ```
+
+`VICTORY_TEXTURE_BACK=1` (victory-fork PR 999) copies the water textures
+the title reads on the CPU back into its memory: without it a boat sinks
+and the first boat mission fails. victory-fork's tester saw the card lost
+once in a run with it on, cause not known.
 
 Or with the script that sets all of these and keeps each run's log and a
 short summary in a folder next to the repository:
