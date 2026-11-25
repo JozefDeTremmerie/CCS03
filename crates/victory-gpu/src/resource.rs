@@ -1399,7 +1399,11 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             && r.desc.dimension == TEXTURE_2D
             && r.desc.depth_or_array_size == 1
             && r.desc.mip_levels > 1
-            && r.desc.sample_count <= 1;
+            && r.desc.sample_count <= 1
+            // Not one made without its largest levels (`drop_levels`,
+            // CCS03's 8 GB cards): the tiles are counted by the title's
+            // levels, and such a host texture has fewer.
+            && drop_levels(&r.desc) == 0;
         if shape_fits && r.host.placed.load(Relaxed) && crate::tiles::wanted() {
             let bytes = footprint(&r.desc).map_or(0, |f| f.size);
             let start = r.data() as u64;
