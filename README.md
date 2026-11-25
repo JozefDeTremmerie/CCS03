@@ -33,8 +33,36 @@ title you need your own copy.
 
 ## Status
 
-CCS03 follows victory-fork `main` (base `d510ee4`, 25 November). What
-follows is what CCS03 itself has seen.
+CCS03 follows victory-fork `main` (base `085ee7c`, 25 November, evening). What
+follows is what CCS03 itself has seen, with its own code on top of that base.
+
+### Where it stands
+
+GTA VI (Xbox Series build, our own dump) on Windows with an NVIDIA card
+of 8 GB, on a laptop (GeForce RTX 4060 Laptop GPU, Ryzen 9 7845HX):
+
+| Milestone | State |
+|-----------|-------|
+| Loads and boots | yes: logos, account picker and loading screens |
+| Main menu | yes, at 30 fps |
+| In the world | yes: the opening cutscene (the diner) plays with sound, characters and room lit |
+| Playable | yes, slowly: in Lucia's prologue the game hands over control and the player walks the cell and the prison yard and turns the camera, with a pad or the keyboard |
+| Frame rate | 30 fps in the menus; 1 to 3 fps in the opening cutscene (slowest in its first minutes while textures stream onto the 8 GB card); 3 to 7.6 fps in the prison (130 to 300 ms a frame, 3,400 to 6,000 draws) |
+| Stability | runs of 2.5 to 11 minutes, each closed by us: no crash, out-of-memory or device removal |
+| Story | the start of Lucia's prologue; nothing further tried yet |
+
+Videos of the laptop runs of 25 November:
+[run 1](https://youtu.be/aDwAmX76wsc) and
+[run 2](https://youtu.be/AEZf0yMl4A8).
+
+CCS03's own work on top of victory-fork, among others (the full list with
+authors is in [CCS03.md](CCS03.md)): textures without their largest
+levels on 8 GB cards, the title's Series S upscaler and second present
+plane, the write-watch journal and the heap's slot lock no longer held
+across kernel calls (268 to 219 ms a frame in the cell), DirectStorage
+staging scaled for our decode workers, an ambient light with shade where
+the title's ray-traced light is missing, quad reads for pixel quads, and
+16-bit buffer views.
 
 ### Test runs of 2026-11-25, evening: in control of the character
 
