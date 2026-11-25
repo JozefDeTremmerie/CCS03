@@ -54,6 +54,20 @@ impl Fields {
         } else {
             finite_lod(self.max_lod, min_lod).max(min_lod)
         };
+        if as_before() {
+            return D3D12_SAMPLER_DESC {
+                Filter: D3D12_FILTER((reduction << 7 | filter) as i32),
+                AddressU: D3D12_TEXTURE_ADDRESS_MODE(self.address[0] as i32),
+                AddressV: D3D12_TEXTURE_ADDRESS_MODE(self.address[1] as i32),
+                AddressW: D3D12_TEXTURE_ADDRESS_MODE(self.address[2] as i32),
+                MipLODBias: self.bias,
+                MaxAnisotropy: if aniso { self.anisotropy.clamp(1, 16) } else { 1 },
+                ComparisonFunc: D3D12_COMPARISON_FUNC(self.compare.max(1) as i32),
+                BorderColor: self.border,
+                MinLOD: self.min_lod,
+                MaxLOD: if self.mip == 0 { self.min_lod } else { self.max_lod },
+            };
+        }
         D3D12_SAMPLER_DESC {
             Filter: D3D12_FILTER((reduction << 7 | filter) as i32),
             AddressU: address_mode(self.address[0]),
@@ -82,6 +96,48 @@ impl Fields {
     }
 }
 
+/// Whether samplers are described as before victory-fork #653
+/// (`VICTORY_SAMPLER_AS_BEFORE=1`): the title's address modes, bias and
+/// LOD bounds passed on as they are. To compare the picture in one build:
+/// a face in the cell turned green with the bounds kept (25 November).
+fn as_before() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SAMPLER_AS_BEFORE").is_some_and(|v| v == "1"))
+}
+
+/// What of a title's sampler description the host cannot take as it is
+/// (an address mode past 1-5, a bias past D3D12's range, LOD bounds that
+/// are not finite or not in order), said once for each kind, with the
+/// description's words.
+fn note_odd(f: &Fields, words: &[u32; 27]) {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    static SAID: AtomicU32 = AtomicU32::new(0);
+    let odd = [
+        f.address.iter().any(|a| !(1..=5).contains(a)),
+        f.bias.is_nan() || !(D3D12_MIP_LOD_BIAS_MIN..=D3D12_MIP_LOD_BIAS_MAX).contains(&f.bias),
+        !f.min_lod.is_finite() || !f.max_lod.is_finite(),
+        f.mip != 0 && f.max_lod < f.min_lod,
+    ];
+    for (bit, (&is, what)) in odd
+        .iter()
+        .zip(["an address mode past 1-5", "a bias past the host's range", "an LOD bound not finite", "LOD bounds out of order"])
+        .enumerate()
+    {
+        if is && SAID.fetch_or(1 << bit, Relaxed) & (1 << bit) == 0 {
+            tracing::info!(
+                what,
+                address = ?f.address,
+                bias = f.bias,
+                min_lod = f.min_lod,
+                max_lod = f.max_lod,
+                mip = f.mip,
+                words = ?&words[..17],
+                "a title sampler the host cannot take as it is (said once per kind; VICTORY_SAMPLER_AS_BEFORE=1 passes it on as before)"
+            );
+        }
+    }
+}
+
 /// Maps a console address mode (`1..=5`) to host D3D12, falling back to `CLAMP`.
 fn address_mode(mode: u32) -> D3D12_TEXTURE_ADDRESS_MODE {
     match mode {
@@ -105,7 +161,7 @@ fn finite_lod(value: f32, fallback: f32) -> f32 {
 /// and threshold, comparison, border color, then tuning words.
 pub(crate) fn console(words: &[u32; 27]) -> D3D12_SAMPLER_DESC {
     let f = |i: usize| f32::from_bits(words[i]);
-    Fields {
+    let fields = Fields {
         mag: words[1],
         min: words[2],
         mip: words[3],
@@ -117,8 +173,9 @@ pub(crate) fn console(words: &[u32; 27]) -> D3D12_SAMPLER_DESC {
         anisotropy: words[13],
         compare: words[16],
         border: [f(17), f(18), f(19), f(20)],
-    }
-    .host()
+    };
+    note_odd(&fields, words);
+    fields.host()
 }
 
 #[cfg(test)]
