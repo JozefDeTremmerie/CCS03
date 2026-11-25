@@ -231,6 +231,11 @@ every five seconds how fast the game runs against real time. Cutscenes and
 their sound may drift apart with it on; it is meant for driving and
 sailing.
 
+`VICTORY_WATCH_PROGRAMS=<name>,<name>` logs, every three seconds, what the
+buffers written by programs of those names hold as the title reads them
+(for instance `CS_ResolveHeightLookUps,CS_BatchReadback` for the water
+heights boats float on).
+
 A shader and pipeline cache per PC (`VICTORY_CACHE_DIR`) keeps two
 machines with different cards from rebuilding each other's pipelines.
 Without the Series S profile, an 8 GB card runs out of memory in the world

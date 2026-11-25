@@ -33,6 +33,8 @@ mod ambient;
 #[cfg(windows)]
 mod reflect;
 #[cfg(windows)]
+mod watchprog;
+#[cfg(windows)]
 mod drvwatch;
 #[cfg(windows)]
 mod fpsbox;

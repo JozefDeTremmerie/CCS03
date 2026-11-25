@@ -1370,6 +1370,7 @@ extern "system" fn present(
         crate::framelog::add(crate::framelog::T::PresentUs, presenting.elapsed().as_micros() as u64);
         crate::framelog::frame();
         game_clock_frame();
+        crate::watchprog::sample();
         #[cfg(feature = "diagnostics")]
         crate::fence::pace::frame();
     }
