@@ -123,10 +123,14 @@ laptop, `--console series-s`.
   copies of title memory from 60-210 to 38-95 ms a frame and the time the
   card waits for us from 120-185 to 56-70 ms; the frame rate stayed at 5.5
   to 7.8.
-- The four programs that fail, by the title's own names: 
+- The four programs that fail, by the title's own names:
   `CS_TransmissionVolumetricsSubmerged` does not translate (a lane mask
   holding lanes elsewhere read as data, in a console wave64 program on
-  NVIDIA's 32-lane waves); the driver refuses
+  NVIDIA's 32-lane waves; so does `CS_TransmissionVolumetrics`). Both
+  are the Series S profile's own containers of programs victory-fork
+  already lets take the wave-wide form; with their hashes on that list
+  the submerged one translates to 32-lane waves offline (not yet seen in
+  a run). The driver refuses
   `CS_AlphTransmissionPrefilterMip`, `CS_CollectTriangles_Meshlets` and
   `CS_DefragHeap_ComputeRelocations`.
 - Still open in the picture: the water drawn through Jason's boat, black

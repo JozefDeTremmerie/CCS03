@@ -43,6 +43,7 @@ Windows with an NVIDIA GPU (32-lane waves).
 | PlayStation 5 pads (DualSense, DualSense Edge) read as HID devices while XInput has no first pad, over USB or Bluetooth, rumble over USB | 9hvn9yt2vk-netizen |
 | Reflections bent down to the ambient light after the title's history pass (`VICTORY_REFLECT_KNEE`), after direct and indirect dispatches | 9hvn9yt2vk-netizen |
 | Failing shaders logged with the title's name for their program | 9hvn9yt2vk-netizen |
+| The Series S profile's water transmission programs on victory-fork's wave-wide list (they did not translate for 32-lane waves) | 9hvn9yt2vk-netizen |
 | `ccs03\play.ps1`: runs with the README's switches, keeps a log and a summary per run (`-Smooth`, `-Fast`, `-Low`, `-Diag`) | 9hvn9yt2vk-netizen |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
