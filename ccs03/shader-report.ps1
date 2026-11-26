@@ -14,7 +14,9 @@ param(
     [string] $Out = 'shader-report',
     [int] $Jobs = 0,
     # Only the run's log, against the programs.tsv of an earlier pass in -Out.
-    [switch] $RunOnly
+    [switch] $RunOnly,
+    # The report again from the translate.txt of an earlier pass in -Out, without translating.
+    [switch] $Reuse
 )
 $ErrorActionPreference = 'Stop'
 $began = Get-Date
@@ -34,8 +36,8 @@ if (-not $Title) {
     $config = $env:VICTORY_CONFIG
     if (-not $config) { $config = Join-Path (Split-Path -Parent $Victory) 'victory.toml' }
     if (Test-Path $config) {
-        $dir = (Select-String -Path $config -Pattern "^\s*game_dir\s*=\s*['""]([^'""]+)['""]" | Select-Object -First 1).Matches.Groups[1].Value
-        if ($dir) { $Title = Join-Path $dir 'game_scarlett_master.exe' }
+        $m = Select-String -Path $config -Pattern "^\s*game_dir\s*=\s*['""]([^'""]+)['""]" | Select-Object -First 1
+        if ($m) { $Title = Join-Path $m.Matches[0].Groups[1].Value 'game_scarlett_master.exe' }
     }
 }
 
@@ -74,20 +76,22 @@ if (-not $RunOnly) {
     if (Test-Path $pack) { $paths += $pack }
     $paths += $Title
     $census = Join-Path $Out 'census.tsv'
-    Remove-Item -ErrorAction SilentlyContinue $census
+    if (-not $Reuse) { Remove-Item -ErrorAction SilentlyContinue $census }
     $env:VICTORY_SHADER_CENSUS = $census
     $raw = Join-Path $Out 'translate.txt'
     $err = Join-Path $Out 'translate-stderr.txt'
-    $arguments = @('translate', '--validate', '--pipelines', '--list')
-    if ($Jobs -gt 0) { $arguments += @('--jobs', "$Jobs") }
-    $arguments += $paths | ForEach-Object { '"' + $_ + '"' }
-    Write-Host "Translating every shader program of $(($paths | ForEach-Object { Split-Path -Leaf $_ }) -join ' and ')"
-    Write-Host "(host waves $($env:VICTORY_HOST_WAVE), view heap $([int]$env:VICTORY_VIEW_LIMIT + 1)); 10 to 30 minutes..."
-    $p = Start-Process -FilePath $Victory -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $Victory) `
-        -RedirectStandardOutput $raw -RedirectStandardError $err -NoNewWindow -PassThru
-    $null = $p.Handle
-    while (-not $p.WaitForExit(30000)) { Write-Host ("  {0:n0} s" -f ((Get-Date) - $began).TotalSeconds) }
-    if ($p.ExitCode -ne 0) { Write-Host "translate ended with code $($p.ExitCode); see translate-stderr.txt" -ForegroundColor Yellow }
+    if ($Reuse -and (Test-Path $raw)) { Write-Host "Reading the earlier pass in $raw" } else {
+        $arguments = @('translate', '--validate', '--pipelines', '--list')
+        if ($Jobs -gt 0) { $arguments += @('--jobs', "$Jobs") }
+        $arguments += $paths | ForEach-Object { '"' + $_ + '"' }
+        Write-Host "Translating every shader program of $(($paths | ForEach-Object { Split-Path -Leaf $_ }) -join ' and ')"
+        Write-Host "(host waves $($env:VICTORY_HOST_WAVE), view heap $([int]$env:VICTORY_VIEW_LIMIT + 1)); 10 to 30 minutes..."
+        $p = Start-Process -FilePath $Victory -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $Victory) `
+            -RedirectStandardOutput $raw -RedirectStandardError $err -NoNewWindow -PassThru
+        $null = $p.Handle
+        while (-not $p.WaitForExit(30000)) { Write-Host ("  {0:n0} s" -f ((Get-Date) - $began).TotalSeconds) }
+        if ($p.ExitCode -ne 0) { Write-Host "translate ended with code $($p.ExitCode); see translate-stderr.txt" -ForegroundColor Yellow }
+    }
 
     $wave64 = @{}
     if (Test-Path $census) {
@@ -109,9 +113,10 @@ if (-not $RunOnly) {
         if ($outcome -eq 'duplicate') { continue }
         $key = $label -replace ' at 0x[0-9a-f]+$', ''
         if (-not $programs.Contains($key)) {
+            # the record's name (a packed record's label), else the one in the container
             $name = ''
-            if ($key -match '@0x[0-9a-f]+ ([A-Za-z]\w+) #') { $name = $Matches[1] }
-            elseif ($key -match '~[0-9a-f]{8} ([A-Za-z]\w+)') { $name = $Matches[1] }
+            if (($key -match '@0x[0-9a-f]+ (.+?) #[0-9a-f]{16}') -and ($Matches[1] -ne '?')) { $name = $Matches[1] }
+            elseif ($key -match '~[0-9a-f]{8} (\S+) (Ls|Hs|Es|Gs|Vs|Ps|Ms|Cs)$') { $name = $Matches[1] }
             $hash = ''; if ($key -match '#([0-9a-f]{16})') { $hash = $Matches[1] }
             $stage = ''; if ($key -match ' (Ls|Hs|Es|Gs|Vs|Ps|Ms|Cs)$') { $stage = $Matches[1] }
             $source = Split-Path -Leaf (($key -split '@')[0])
@@ -144,6 +149,7 @@ if (-not $RunOnly) {
 }
 
 # The summary.
+function Shown($r) { if ($r.Name) { "$($r.Name) #$($r.Hash)" } else { "(no name) #$($r.Hash)" } }
 $s = New-Object System.Collections.Generic.List[string]
 $s.Add("CCS03 shader report, $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
 $version = Join-Path (Split-Path -Parent $Victory) 'VERSIE.txt'
@@ -173,7 +179,7 @@ if ($all.Count -gt 0) {
             $form = if ($g.Name) { $g.Name } else { '(none: did not translate)' }
             $s.Add(('{0,7:n0}  {1}' -f $g.Count, $form))
             if ($form -match 'APPROXIMATE|wave64 kept') {
-                foreach ($r in ($g.Group | Sort-Object Name)) { $s.Add("           $($r.Name) #$($r.Hash)") }
+                foreach ($r in ($g.Group | Sort-Object Name)) { $s.Add("           $(Shown $r)") }
             }
         }
         $s.Add('(APPROXIMATE: each half of a console wave gives its own result; wave64 kept: the driver refuses it)')
@@ -190,7 +196,7 @@ if ($all.Count -gt 0) {
     }
     foreach ($k in ($byReason.Keys | Sort-Object { $byReason[$_].Count } -Descending)) {
         $s.Add(('{0,7:n0}  {1}' -f $byReason[$k].Count, $k))
-        foreach ($r in ($byReason[$k] | Select-Object -First 12)) { $s.Add("           $($r.Stage) $($r.Name) #$($r.Hash)") }
+        foreach ($r in ($byReason[$k] | Select-Object -First 12)) { $s.Add("           $($r.Stage) $(Shown $r)") }
         if ($byReason[$k].Count -gt 12) { $s.Add("           ... $($byReason[$k].Count - 12) more in programs.tsv") }
     }
     $s.Add('')
@@ -248,6 +254,6 @@ if ($runText) {
 $s.Add(("Made in {0:n0} s. Files: summary.txt, programs.tsv (one line per program), translate.txt (the raw list)" -f ((Get-Date) - $began).TotalSeconds))
 Save 'summary.txt' $s
 Write-Host ''
-Get-Content (Join-Path $Out 'summary.txt') -TotalCount 60 | ForEach-Object { Write-Host $_ }
+Get-Content (Join-Path $Out 'summary.txt') -TotalCount 100 | ForEach-Object { Write-Host $_ }
 Write-Host ''
 Write-Host "Report: $Out\summary.txt"

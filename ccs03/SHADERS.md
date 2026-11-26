@@ -32,15 +32,17 @@ victory translate --validate --pipelines --list <game folder>\shaders.rpf <game 
 which takes every shader container out of the shader pack and the
 executable (about 26,000 programs), translates each, validates the DXIL
 with `dxil.dll` (`VICTORY_DXIL`, else the newest Windows SDK's) and asks
-the driver for a pipeline with it. That takes 10 to 30 minutes on an
-8-core laptop.
+the driver for a pipeline with it. That took 21 minutes on a laptop with a
+Ryzen 9 7845HX and an RTX 4060 Laptop GPU (`-Jobs 16`).
 
 To add a run: play with `VICTORY_LOG=info` (as `9-meet.bat` does), close
 the game, and pass its log with `-RunLog <log>`. The script then also
 translates as that run did (its host wave size and view heap, from the
 log's `host wave lanes` and `host view heaps hold` lines). With
 `-RunOnly` it reads only the log, against the `programs.tsv` of an earlier
-pass in the same `-Out` folder.
+pass in the same `-Out` folder. With `-Reuse` it makes the report again from the
+`translate.txt` of an earlier pass in that folder, in seconds, without
+translating anything.
 
 ## The files
 
