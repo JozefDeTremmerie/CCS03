@@ -1,5 +1,5 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3), a PlayStation 5 pad in the first slot while XInput has
+//! (host slots 0-3), a PlayStation 4 or 5 pad in the first slot while XInput has
 //! none there ([`dualsense`]); while none is connected, the keyboard drives one
 //! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
 //! too. A poll thread turns host state into readings (a new one per change)
