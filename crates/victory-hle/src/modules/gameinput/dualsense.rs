@@ -1,11 +1,12 @@
-//! PlayStation 5 pads (DualSense and DualSense Edge) read as HID devices.
+//! PlayStation 4 and 5 pads (DualShock 4, DualSense and DualSense Edge)
+//! read as HID devices.
 //!
 //! Windows gives these pads no XInput slot, so without a helper program
 //! they were not seen at all. When XInput has no pad in its first slot,
 //! the first pad found here plays as that pad: over USB or Bluetooth, with
 //! the face buttons where an Xbox pad has them (cross A, circle B, square X,
-//! triangle Y), Options as Menu and Create or a touchpad click as View.
-//! Rumble reaches pads on USB.
+//! triangle Y), Options as Menu and Share, Create or a touchpad click as
+//! View. Rumble reaches pads on USB.
 //! shortcut: no adaptive triggers, light bar, touchpad or motion.
 
 use super::{
@@ -16,6 +17,27 @@ use super::{
 /// Sony's USB vendor id and the pads' product ids.
 pub(super) const VENDOR: u16 = 0x054C;
 pub(super) const PRODUCTS: [u16; 2] = [0x0CE6, 0x0DF2];
+/// The DualShock 4's: the first model, the second, and Sony's USB wireless
+/// adapter, which passes on a DualShock 4's reports.
+pub(super) const PS4_PRODUCTS: [u16; 3] = [0x05C4, 0x09CC, 0x0BA0];
+
+/// Which pad it is: their reports differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Model {
+    /// DualSense and DualSense Edge.
+    Ps5,
+    /// DualShock 4.
+    Ps4,
+}
+
+/// The model of a Sony pad with this product id, if it is one we read.
+pub(super) fn model(vendor: u16, product: u16) -> Option<Model> {
+    match (vendor, product) {
+        (VENDOR, p) if PRODUCTS.contains(&p) => Some(Model::Ps5),
+        (VENDOR, p) if PS4_PRODUCTS.contains(&p) => Some(Model::Ps4),
+        _ => None,
+    }
+}
 
 /// How a pad is connected: its reports differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,21 +49,27 @@ pub(super) enum Link {
 /// One input report as the pad sent it (report id first), or `None` if it
 /// is not one of its input reports.
 ///
-/// Over USB every report is id 0x01 with sticks, triggers and buttons from
-/// byte 1. Over Bluetooth the pad sends a short id 0x01 report (sticks,
-/// buttons, then triggers) until it is asked for its full one, id 0x31,
-/// which holds the USB layout from byte 2.
-pub(super) fn parse(link: Link, report: &[u8]) -> Option<PadState> {
+/// A PlayStation 5 pad on USB sends id 0x01 with sticks, triggers and
+/// buttons from byte 1. Over Bluetooth it sends a short id 0x01 report
+/// (sticks, buttons, then triggers) until it is asked for its full one, id
+/// 0x31, which holds the USB layout from byte 2.
+///
+/// A DualShock 4 sends the short layout as id 0x01 on USB, and over
+/// Bluetooth until it is asked for more; its full Bluetooth report, id
+/// 0x11, holds the same from byte 3. Its button bits are the DualSense's.
+pub(super) fn parse(model: Model, link: Link, report: &[u8]) -> Option<PadState> {
     // Sticks and triggers (lx, ly, rx, ry, l2, r2), and the three button
     // bytes.
-    let (axes, buttons): ([u8; 6], [u8; 3]) = match (link, report) {
-        (Link::Usb, [0x01, lx, ly, rx, ry, l2, r2, _, b0, b1, b2, ..]) => {
+    let (axes, buttons): ([u8; 6], [u8; 3]) = match (model, link, report) {
+        (Model::Ps5, Link::Usb, [0x01, lx, ly, rx, ry, l2, r2, _, b0, b1, b2, ..]) => {
             ([*lx, *ly, *rx, *ry, *l2, *r2], [*b0, *b1, *b2])
         }
-        (Link::Bluetooth, [0x31, _, lx, ly, rx, ry, l2, r2, _, b0, b1, b2, ..]) => {
+        (Model::Ps5, Link::Bluetooth, [0x31, _, lx, ly, rx, ry, l2, r2, _, b0, b1, b2, ..]) => {
             ([*lx, *ly, *rx, *ry, *l2, *r2], [*b0, *b1, *b2])
         }
-        (Link::Bluetooth, [0x01, lx, ly, rx, ry, b0, b1, b2, l2, r2, ..]) => {
+        (Model::Ps5, Link::Bluetooth, [0x01, lx, ly, rx, ry, b0, b1, b2, l2, r2, ..])
+        | (Model::Ps4, _, [0x01, lx, ly, rx, ry, b0, b1, b2, l2, r2, ..])
+        | (Model::Ps4, Link::Bluetooth, [0x11, _, _, lx, ly, rx, ry, b0, b1, b2, l2, r2, ..]) => {
             ([*lx, *ly, *rx, *ry, *l2, *r2], [*b0, *b1, *b2])
         }
         _ => return None,
@@ -96,15 +124,27 @@ pub(super) fn parse(link: Link, report: &[u8]) -> Option<PadState> {
 }
 
 /// The output report that sets the two rumble motors of a pad on USB:
-/// `len` bytes (the device's output report length), id 0x02, then the
-/// flags that say the motors are given (compatible vibration, haptics
-/// select) and the right (high frequency) and left (low frequency) motor.
-pub(super) fn rumble_report(len: usize, low: u16, high: u16) -> Vec<u8> {
-    let mut report = vec![0u8; len.max(5)];
-    report[0] = 0x02;
-    report[1] = 0x01 | 0x02;
-    report[3] = (high >> 8) as u8;
-    report[4] = (low >> 8) as u8;
+/// `len` bytes (the device's output report length). A PlayStation 5 pad
+/// takes id 0x02, then the flags that say the motors are given (compatible
+/// vibration, haptics select) and the right (high frequency) and left (low
+/// frequency) motor; a DualShock 4 takes id 0x05, the flag for the motors,
+/// two bytes, then the right and the left motor.
+pub(super) fn rumble_report(model: Model, len: usize, low: u16, high: u16) -> Vec<u8> {
+    let mut report = vec![0u8; len.max(6)];
+    match model {
+        Model::Ps5 => {
+            report[0] = 0x02;
+            report[1] = 0x01 | 0x02;
+            report[3] = (high >> 8) as u8;
+            report[4] = (low >> 8) as u8;
+        }
+        Model::Ps4 => {
+            report[0] = 0x05;
+            report[1] = 0x01;
+            report[4] = (high >> 8) as u8;
+            report[5] = (low >> 8) as u8;
+        }
+    }
     report
 }
 
@@ -130,7 +170,7 @@ pub(super) mod reader {
     };
 
     use super::{
-        LEFT_SHOULDER, Link, PRODUCTS, PadState, RIGHT_SHOULDER, VENDOR, parse, rumble_report,
+        LEFT_SHOULDER, Link, Model, PadState, RIGHT_SHOULDER, model, parse, rumble_report,
     };
 
     /// Looking for a pad again this often while none is there.
@@ -153,7 +193,7 @@ pub(super) mod reader {
     #[derive(Default)]
     struct Shared {
         pad: Option<PadState>,
-        out: Option<(Arc<Owned>, usize)>,
+        out: Option<(Arc<Owned>, usize, Model)>,
     }
 
     /// The reader thread's results.
@@ -185,8 +225,10 @@ pub(super) mod reader {
                 .unwrap_or_else(|e| e.into_inner())
                 .out
                 .clone();
-            let Some((handle, len)) = out else { return };
-            let report = rumble_report(len, low, high);
+            let Some((handle, len, model)) = out else {
+                return;
+            };
+            let report = rumble_report(model, len, low, high);
             let mut written = 0;
             // SAFETY: an open handle and our own buffer of `report.len()`
             // bytes.
@@ -205,7 +247,7 @@ pub(super) mod reader {
     fn run(shared: &Mutex<Shared>) {
         let mut said = false;
         loop {
-            let Some(path) = find() else {
+            let Some((path, model)) = find() else {
                 std::thread::sleep(LOOK_AGAIN);
                 continue;
             };
@@ -217,7 +259,7 @@ pub(super) mod reader {
             };
             let handle = Arc::new(handle);
             // A pad on USB sends 64-byte reports; over Bluetooth the device
-            // reports the length of its longest (78).
+            // reports the length of its longest (78, or 547 for a DualShock 4).
             let link = if input <= 64 {
                 Link::Usb
             } else {
@@ -225,14 +267,15 @@ pub(super) mod reader {
             };
             if !said {
                 tracing::info!(
+                    ?model,
                     ?link,
-                    "a PlayStation 5 pad plays as the first pad while XInput has none"
+                    "a PlayStation pad plays as the first pad while XInput has none"
                 );
                 said = true;
             }
             {
                 let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
-                s.out = (link == Link::Usb && output > 0).then(|| (handle.clone(), output));
+                s.out = (link == Link::Usb && output > 0).then(|| (handle.clone(), output, model));
             }
             let mut buffer = vec![0u8; input.max(64)];
             let (mut last, mut told) = ([false; 4], [0u8; 4]);
@@ -252,7 +295,7 @@ pub(super) mod reader {
                 if ok == 0 || read == 0 {
                     break;
                 }
-                if let Some(pad) = parse(link, &buffer[..read as usize]) {
+                if let Some(pad) = parse(model, link, &buffer[..read as usize]) {
                     // The first presses of the triggers and shoulders, with
                     // the report's first bytes, so that a pad whose
                     // reports differ can be told apart in a log.
@@ -270,7 +313,7 @@ pub(super) mod reader {
                                 left_trigger = pad.left_trigger,
                                 right_trigger = pad.right_trigger,
                                 bytes = ?&buffer[..read.min(12) as usize],
-                                "PlayStation 5 pad: pressed"
+                                "PlayStation pad: pressed"
                             );
                         }
                         *was = now;
@@ -278,7 +321,7 @@ pub(super) mod reader {
                     shared.lock().unwrap_or_else(|e| e.into_inner()).pad = Some(pad);
                 }
             }
-            tracing::info!("the PlayStation 5 pad is gone");
+            tracing::info!(?model, "the PlayStation pad is gone");
             let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
             s.pad = None;
             s.out = None;
@@ -325,8 +368,9 @@ pub(super) mod reader {
         ))
     }
 
-    /// The path of the first PlayStation 5 pad present, NUL-terminated.
-    fn find() -> Option<Vec<u16>> {
+    /// The path of the first PlayStation pad present, NUL-terminated, and
+    /// its model.
+    fn find() -> Option<(Vec<u16>, Model)> {
         // SAFETY: plain data, filled by the call.
         let mut hid: windows_sys::core::GUID = unsafe { std::mem::zeroed() };
         // SAFETY: room for the GUID.
@@ -401,8 +445,8 @@ pub(super) mod reader {
                 path.push(0);
                 path
             };
-            if is_pad(&path) {
-                found = Some(path);
+            if let Some(model) = pad_model(&path) {
+                found = Some((path, model));
                 break;
             }
         }
@@ -411,9 +455,9 @@ pub(super) mod reader {
         found
     }
 
-    /// Whether the device at `path` is a PlayStation 5 pad (asked without
-    /// read or write access, which every HID device allows).
-    fn is_pad(path: &[u16]) -> bool {
+    /// The model of the PlayStation pad at `path`, if it is one (asked
+    /// without read or write access, which every HID device allows).
+    fn pad_model(path: &[u16]) -> Option<Model> {
         // SAFETY: a NUL-terminated path; plain creation.
         let handle = unsafe {
             CreateFileW(
@@ -427,7 +471,7 @@ pub(super) mod reader {
             )
         };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return false;
+            return None;
         }
         let handle = Owned(handle);
         let mut attributes = HIDD_ATTRIBUTES {
@@ -436,7 +480,10 @@ pub(super) mod reader {
         };
         // SAFETY: an open HID handle; room for the attributes.
         let known = unsafe { HidD_GetAttributes(handle.0, &mut attributes) };
-        known && attributes.VendorID == VENDOR && PRODUCTS.contains(&attributes.ProductID)
+        if !known {
+            return None;
+        }
+        model(attributes.VendorID, attributes.ProductID)
     }
 }
 
@@ -455,7 +502,7 @@ mod tests {
 
     #[test]
     fn a_resting_pad_reads_as_nothing_pressed() {
-        let pad = parse(Link::Usb, &usb()).unwrap();
+        let pad = parse(Model::Ps5, Link::Usb, &usb()).unwrap();
         assert_eq!(pad.buttons, 0);
         assert_eq!(
             (pad.left_x, pad.left_y, pad.right_x, pad.right_y),
@@ -470,7 +517,7 @@ mod tests {
         r[8] = 0x20 | 0x80 | 0x02; // cross, triangle, d-pad right
         r[9] = 0x01 | 0x20 | 0x40; // L1, Options, L3
         r[10] = 0x02; // touchpad click
-        let pad = parse(Link::Usb, &r).unwrap();
+        let pad = parse(Model::Ps5, Link::Usb, &r).unwrap();
         assert_eq!(
             pad.buttons,
             A | Y | RIGHT | LEFT_SHOULDER | MENU | LEFT_STICK | VIEW
@@ -481,9 +528,12 @@ mod tests {
     fn the_hat_gives_diagonals() {
         let mut r = usb();
         r[8] = 7;
-        assert_eq!(parse(Link::Usb, &r).unwrap().buttons, UP | LEFT);
+        assert_eq!(parse(Model::Ps5, Link::Usb, &r).unwrap().buttons, UP | LEFT);
         r[8] = 3;
-        assert_eq!(parse(Link::Usb, &r).unwrap().buttons, DOWN | RIGHT);
+        assert_eq!(
+            parse(Model::Ps5, Link::Usb, &r).unwrap().buttons,
+            DOWN | RIGHT
+        );
     }
 
     #[test]
@@ -494,7 +544,7 @@ mod tests {
         r[4] = 255; // right stick down
         r[5] = 255;
         r[6] = 0;
-        let pad = parse(Link::Usb, &r).unwrap();
+        let pad = parse(Model::Ps5, Link::Usb, &r).unwrap();
         assert_eq!((pad.left_x, pad.left_y, pad.right_y), (1.0, 1.0, -1.0));
         assert_eq!((pad.left_trigger, pad.right_trigger), (1.0, 0.0));
     }
@@ -506,7 +556,7 @@ mod tests {
         full[0] = 0x31;
         full[2..6].copy_from_slice(&[128, 0, 128, 128]);
         full[9] = 0x08 | 0x40; // no d-pad, circle
-        let pad = parse(Link::Bluetooth, &full).unwrap();
+        let pad = parse(Model::Ps5, Link::Bluetooth, &full).unwrap();
         assert_eq!(pad.buttons, B);
         assert_eq!(pad.left_y, 1.0);
         // Short: sticks, buttons, then triggers.
@@ -515,22 +565,68 @@ mod tests {
         short[1..5].copy_from_slice(&[128, 128, 128, 128]);
         short[5] = 0x08 | 0x10; // square
         short[8] = 255;
-        let pad = parse(Link::Bluetooth, &short).unwrap();
+        let pad = parse(Model::Ps5, Link::Bluetooth, &short).unwrap();
         assert_eq!(pad.buttons, X);
         assert_eq!(pad.left_trigger, 1.0);
     }
 
     #[test]
     fn other_reports_are_not_input() {
-        assert!(parse(Link::Usb, &[0x05, 0, 0]).is_none());
-        assert!(parse(Link::Usb, &[0x01, 128]).is_none());
-        assert!(parse(Link::Bluetooth, &[0x02; 20]).is_none());
+        assert!(parse(Model::Ps5, Link::Usb, &[0x05, 0, 0]).is_none());
+        assert!(parse(Model::Ps5, Link::Usb, &[0x01, 128]).is_none());
+        assert!(parse(Model::Ps5, Link::Bluetooth, &[0x02; 20]).is_none());
     }
 
     #[test]
     fn rumble_reports_carry_both_motors() {
-        let r = rumble_report(48, 0xFF00, 0x8000);
+        let r = rumble_report(Model::Ps5, 48, 0xFF00, 0x8000);
         assert_eq!(r.len(), 48);
         assert_eq!(&r[..5], &[0x02, 0x03, 0x00, 0x80, 0xFF]);
+        let r = rumble_report(Model::Ps4, 32, 0xFF00, 0x8000);
+        assert_eq!(r.len(), 32);
+        assert_eq!(&r[..6], &[0x05, 0x01, 0x00, 0x00, 0x80, 0xFF]);
+    }
+
+    /// A DualShock 4 report: sticks, buttons, then triggers, from `at`.
+    fn ps4(id: u8, at: usize) -> Vec<u8> {
+        let mut r = vec![0u8; 64];
+        r[0] = id;
+        r[at..at + 4].copy_from_slice(&[128, 128, 128, 128]);
+        r[at + 4] = 0x08;
+        r
+    }
+
+    #[test]
+    fn a_dualshock_4_reads_on_usb_and_bluetooth() {
+        let mut usb = ps4(0x01, 1);
+        usb[5] = 0x08 | 0x20; // cross
+        usb[6] = 0x02 | 0x10; // R1, Share
+        usb[9] = 255; // R2
+        let pad = parse(Model::Ps4, Link::Usb, &usb).unwrap();
+        assert_eq!(pad.buttons, A | RIGHT_SHOULDER | VIEW);
+        assert_eq!((pad.left_trigger, pad.right_trigger), (0.0, 1.0));
+        // The short report over Bluetooth is the same.
+        assert_eq!(parse(Model::Ps4, Link::Bluetooth, &usb), Some(pad));
+        // The full one, two bytes later.
+        let mut full = ps4(0x11, 3);
+        full[4] = 0; // left stick up
+        full[7] = 0x06 | 0x80; // d-pad left, triangle
+        full[10] = 255; // L2
+        let pad = parse(Model::Ps4, Link::Bluetooth, &full).unwrap();
+        assert_eq!(pad.buttons, LEFT | Y);
+        assert_eq!((pad.left_y, pad.left_trigger), (1.0, 1.0));
+        // Not a DualSense's USB layout.
+        assert_ne!(
+            parse(Model::Ps5, Link::Usb, &usb),
+            parse(Model::Ps4, Link::Usb, &usb)
+        );
+    }
+
+    #[test]
+    fn sony_pads_are_told_apart_by_product() {
+        assert_eq!(model(VENDOR, 0x0CE6), Some(Model::Ps5));
+        assert_eq!(model(VENDOR, 0x09CC), Some(Model::Ps4));
+        assert_eq!(model(VENDOR, 0x05C4), Some(Model::Ps4));
+        assert_eq!(model(0x045E, 0x09CC), None);
     }
 }
