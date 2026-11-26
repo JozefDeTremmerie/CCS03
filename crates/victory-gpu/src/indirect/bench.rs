@@ -187,7 +187,6 @@ fn bench_indirect_draw_barriers() {
     let clamps = [
         make_from(device, OLD_SOURCE).expect("the old clamp"),
         make_for(device).expect("the clamp"),
-        make_single(device).expect("the single-record clamp"),
     ];
     // SAFETY: plain D3D12 object creation with valid descriptions; the
     // objects outlive every list recorded and run below.
@@ -452,7 +451,7 @@ fn bench_indirect_draw_barriers() {
         let (old, new) = (&clamps[0], &clamps[1]);
         // The last two keep the budget in the card's memory instead of
         // memory the CPU maps (where the list's budget is now).
-        let cases: [(&str, Barriers, &Clamp, u32, bool); 8] = [
+        let cases: [(&str, Barriers, &Clamp, u32, bool); 7] = [
             ("one at a time, main", Barriers::Old, old, 1, false),
             ("one at a time, this", Barriers::New, new, 1, false),
             ("windows of 32, main", Barriers::Old, old, WINDOW, false),
@@ -460,7 +459,6 @@ fn bench_indirect_draw_barriers() {
             ("windows of 32, this", Barriers::New, new, WINDOW, false),
             ("one at a time, card", Barriers::New, new, 1, true),
             ("windows of 32, card", Barriers::New, new, WINDOW, true),
-            ("single lane, card", Barriers::New, &clamps[2], 1, true),
         ];
         // Warm up, then the cases in turn, so drift falls on all alike.
         for &(_, barriers, clamp, window, card) in &cases {
