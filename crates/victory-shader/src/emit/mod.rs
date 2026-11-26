@@ -359,6 +359,27 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
 }
 
 thread_local! {
+    /// The form the last [`emit`] on this thread gave its program ([`last_form`]).
+    static FORM: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+fn set_form(form: &str) {
+    FORM.with_borrow_mut(|f| {
+        f.clear();
+        f.push_str(form);
+    });
+}
+
+/// The form the last translation on this thread gave its program: "as
+/// written", or for a console wave64 compute program on a host of 32-lane
+/// waves the form it was taken in (one with "APPROXIMATE" in its name gives
+/// each half-wave its own results), or that it kept its 64 lanes, which
+/// such a host refuses. For reports (`victory translate --list`).
+pub fn last_form() -> String {
+    FORM.with_borrow(Clone::clone)
+}
+
+thread_local! {
     /// [`with_wave_wide`]'s choice, for this thread's translations.
     static WAVE_WIDE_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -409,6 +430,7 @@ pub fn emit(
 ) -> Result<HostShader, ShaderError> {
     // (what an earlier program's lowering on this thread left behind)
     lower::take_needs();
+    set_form("as written");
     let original = emit_program(c, native, p, st, io, res);
     // A console wave64 compute program on a host of 32-lane waves that
     // still needs 64 lanes, or whose cross-lane code sits where not every
@@ -426,6 +448,13 @@ pub fn emit(
     if stuck && native.stage == HwStage::Cs && native.wave64 && lower::host_max_wave() == 32 {
         let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
         let report = |what: &str, r: &Result<(HostShader, Option<u32>), ShaderError>| {
+            // Every form tried that runs on the host is returned at once:
+            // the last one noted is the one taken.
+            if matches!(r, Ok((_, wave)) if *wave != Some(64)) {
+                set_form(what);
+            } else {
+                set_form("wave64 kept: a host of 32-lane waves refuses it");
+            }
             if why {
                 match r {
                     Ok((_, wave)) => eprintln!("WAVE64-RETRY {what}: wave {wave:?}"),
@@ -574,7 +603,10 @@ pub fn emit(
         {
             let again = widen(c, native, p, std::env::var_os("VICTORY_WAVE_WHY").is_some());
             match again {
-                Ok(_) => again,
+                Ok(_) => {
+                    set_form("wave-wide branches (a lane mask at a scalar join)");
+                    again
+                }
                 Err(_) => emit_program(c, native, p, st, io, res),
             }
         }

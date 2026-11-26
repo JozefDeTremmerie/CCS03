@@ -194,6 +194,11 @@ compute programs and all 8,765 mesh programs become DXIL. The 195 geometry
 programs that read an address no root parameter holds are not lowered by
 `translate`.
 
+`ccs03/shader-report.ps1` makes the same pass into a text report for any
+card, with a run's log beside it if there is one: what translates, in
+which form, what the validator and the driver refuse, and what went wrong
+with shaders in the run. How to run and read it: `ccs03/SHADERS.md`.
+
 ### Running
 
 The recommended way on an 8 GB card, as a set of environment variables:

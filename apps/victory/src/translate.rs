@@ -433,7 +433,14 @@ fn translate(
     // `~`: the hash of the DXIL part alone, for comparing diagnostic lines.
     let code = blake3::hash(dxil);
     let code8 = code.to_hex()[..8].to_owned();
-    let example = || format!("{} ~{code8}", example());
+    // The title's name for the program (`CS_DefragHeap_ComputeRelocations_..._Wrapped`, in
+    // the validation info's strings), as the runtime's log names it; a packed record's label
+    // has it already.
+    let named = title_name(&bytes).filter(|name| !source.label().contains(name.as_str()));
+    let example = || match &named {
+        Some(name) => format!("{} ~{code8} {name}", example()),
+        None => format!("{} ~{code8}", example()),
+    };
     // `VICTORY_DUMP_MATCH=<dir>;<text>|<text>...`: the containers whose
     // line holds one of the texts (a name, `#hash`), as the title has them.
     if let Ok(spec) = std::env::var("VICTORY_DUMP_MATCH")
@@ -654,7 +661,7 @@ fn check(
             Ok(()) => {
                 *counter(t, shader.stage, 3) += 1;
                 if t.list {
-                    t.lines.push(format!("{}  pipeline created", label()));
+                    t.lines.push(format!("{}  pipeline created  [{}]", label(), emit::last_form()));
                 }
             }
             Err(e) => t.fail(format!("pipeline: {e}"), &label),
@@ -667,7 +674,7 @@ fn check(
         Ok(()) => {
             *counter(t, shader.stage, 2) += 1;
             if t.list {
-                t.lines.push(format!("{}  validated", label()));
+                t.lines.push(format!("{}  validated  [{}]", label(), emit::last_form()));
             }
         }
         Err(text) => {
@@ -875,6 +882,19 @@ fn tally_structured(program: &ir::Program, s: &structure::Structured, t: &mut Ta
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The program's name in a container, as the runtime's log finds it: the
+/// first run of name characters, eight or more, that starts as a stage's
+/// names do (`CS_`, `PS_`, ...).
+fn title_name(container: &[u8]) -> Option<String> {
+    const PREFIXES: [&str; 8] = ["CS_", "PS_", "VS_", "MS_", "AS_", "GS_", "HS_", "DS_"];
+    container
+        .split(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .filter(|run| run.len() >= 8)
+        .map(String::from_utf8_lossy)
+        .find(|run| PREFIXES.iter().any(|p| run.get(..3).is_some_and(|h| h.eq_ignore_ascii_case(p))))
+        .map(std::borrow::Cow::into_owned)
 }
 
 #[cfg(test)]
