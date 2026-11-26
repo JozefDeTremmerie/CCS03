@@ -11,15 +11,17 @@
 //!   the resource: `descriptor::forget`), which leaves the record as it was;
 //! - its record in title memory is not the one seen at the last look (a
 //!   record copied by the title itself, past the API); a compare of 12
-//!   bytes per slot, no lock and no lookup;
+//!   bytes per slot in slot order, no lock and no lookup;
 //! - it found no host copy at its last look: every 16 passes, as before;
 //! - every [`FULL_EVERY`] passes, all of them, as a safety net.
 //!
 //! The span of a copy is worked out again only when one of its slots went.
-//! `VICTORY_HEAP_PASS_FULL=1` brings back the old pass (all slots every 16
-//! passes, all spans every pass) to compare.
+//!
+//! From fork pull request #523, as darkworldhm's snapshot carries it. Here
+//! the pass is taken only with `VICTORY_HEAP_PASS_MARKED` ([`marked`]);
+//! unset, `draw::State::heap_buffers` runs as it always did.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Passes between two looks at every slot, besides those marked.
 pub(crate) const FULL_EVERY: u64 = 256;
@@ -27,13 +29,68 @@ pub(crate) const FULL_EVERY: u64 = 256;
 /// two looks at every slot with the old pass).
 pub(crate) const ORPHANS_EVERY: u64 = 16;
 
-/// Freed table entries a heap's pass keeps at most ([`Picked::note_forgotten`]).
-pub(crate) const FORGOTTEN_MOST: usize = 1 << 16;
+/// What `VICTORY_HEAP_PASS_MARKED` says: 0 unset (off), 1 on, 2 in turn.
+fn mode() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_HEAP_PASS_MARKED").as_deref() {
+        Ok("1") => 1,
+        Ok("alt") => 2,
+        _ => 0,
+    })
+}
 
-/// Whether `VICTORY_HEAP_PASS_FULL=1` asks for the old pass.
-pub(crate) fn full_pass() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_PASS_FULL").is_some_and(|v| v == "1"))
+/// Whether the switch is set at all (`1` or `alt`): the table entries freed
+/// are then noted for the pass (`descriptor::forget`), in both phases of
+/// `alt`.
+pub(crate) fn marked_set() -> bool {
+    mode() != 0
+}
+
+/// Set when `alt` turns the marked pass on again: what it kept is from
+/// before the other pass's turn, and the other pass took the heap's changes
+/// meanwhile. The marked pass then starts anew (every slot), and has the
+/// other pass start anew at its next turn.
+pub(crate) static RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set when `alt` turns the marked pass off: see [`marked_paused`].
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// With `alt` only: whether the marked pass's turn has just ended (true
+/// once for each end), so that what it kept can be let go for the other
+/// pass's turn. False, with nothing but the switch read, when the switch
+/// is unset or `1`.
+pub(crate) fn marked_paused() -> bool {
+    mode() == 2 && PAUSED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the pass over the heap's buffer views looks only at marked
+/// slots now (`VICTORY_HEAP_PASS_MARKED=1`; off by default: every slot
+/// every 16 passes, as before). `alt`: twenty seconds with, twenty without,
+/// in turn, each change said in the log; the first pass of each turn looks
+/// at every slot.
+pub(crate) fn marked() -> bool {
+    match mode() {
+        0 => false,
+        1 => true,
+        _ => {
+            use std::sync::atomic::Ordering::Relaxed;
+            static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let on = (EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs() / 20) % 2 == 1;
+            static LAST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+            if LAST.swap(u8::from(on), Relaxed) != u8::from(on) {
+                if on {
+                    RESUMED.store(true, Relaxed);
+                } else {
+                    PAUSED.store(true, Relaxed);
+                }
+                tracing::info!(
+                    "the pass over the heap's buffer views looks only at marked slots from now (VICTORY_HEAP_PASS_MARKED=alt): {}",
+                    if on { "ON" } else { "off, every slot every 16 passes as usual" }
+                );
+            }
+            on
+        }
+    }
 }
 
 /// A slot's record in title memory: the tag and two words
@@ -59,16 +116,22 @@ struct Copy<C> {
 /// What a pass looks at (see the module).
 pub(crate) struct Picked<C> {
     passes: u64,
-    slots: HashMap<u32, Slot>,
+    /// In slot order: every pass reads the record of each of them from
+    /// title memory ([`Picked::plan`]), and in the order of a hash table
+    /// those reads fall all over the heap. With 163,000 views kept the
+    /// plan took 1,195 ms of the 10 s profiled that way (run st-x-play,
+    /// 9 ms a frame) and 262 ms in slot order (run st-y-play, 2 ms).
+    slots: BTreeMap<u32, Slot>,
     copies: HashMap<usize, Copy<C>>,
-    /// Slots that found no host copy, with the record seen.
-    orphans: HashMap<u32, Record>,
+    /// Slots that found no host copy, with the record seen. In slot order
+    /// as `slots` is.
+    orphans: BTreeMap<u32, Record>,
     /// View table entry -> slots whose record named it at their last look
     /// (some may name another by now: checked when used).
     by_entry: HashMap<u32, Vec<u32>>,
     /// Table entries freed since the last pass; `None`: not known.
     forgotten: Option<Vec<u32>>,
-    /// The old pass (`VICTORY_HEAP_PASS_FULL=1`).
+    /// The old pass's rules, kept for the tests.
     full: bool,
 }
 
@@ -76,9 +139,9 @@ impl<C: Clone> Picked<C> {
     pub(crate) fn new(full: bool) -> Self {
         Picked {
             passes: 0,
-            slots: HashMap::new(),
+            slots: BTreeMap::new(),
             copies: HashMap::new(),
-            orphans: HashMap::new(),
+            orphans: BTreeMap::new(),
             by_entry: HashMap::new(),
             forgotten: None,
             full,
@@ -88,29 +151,11 @@ impl<C: Clone> Picked<C> {
     /// View table entries were freed (`None`: some were, which is not
     /// known): their slots are looked at next pass. Every heap's pass is
     /// told, though one of them asks.
-    ///
-    /// Only entries some slot's record named at its last look are kept (the
-    /// others change nothing), and at most [`FORGOTTEN_MOST`] of them: a
-    /// heap whose pass does not run (the title draws with another) is told
-    /// at every pass of the one that does, and kept every entry before
-    /// (2,097,152 in a review's run). Past that the list is dropped, and
-    /// that heap's next pass looks at all its slots.
     pub(crate) fn note_forgotten(&mut self, entries: Option<&[u32]>) {
         match (entries, &mut self.forgotten) {
-            (Some(new), Some(kept)) => {
-                kept.extend(new.iter().copied().filter(|e| self.by_entry.contains_key(e)));
-                if kept.len() > FORGOTTEN_MOST {
-                    self.forgotten = None;
-                }
-            }
+            (Some(new), Some(kept)) => kept.extend_from_slice(new),
             _ => self.forgotten = None,
         }
-    }
-
-    /// The entries kept for the next pass (tests).
-    #[cfg(test)]
-    fn forgotten_len(&self) -> Option<usize> {
-        self.forgotten.as_ref().map(Vec::len)
     }
 
     /// The slots this pass looks at again, in order. `changed`: the slots
@@ -144,7 +189,7 @@ impl<C: Clone> Picked<C> {
             self.clear();
             return all();
         }
-        let mut due: HashSet<u32> = changed.into_iter().collect();
+        let mut due = changed;
         for e in forgotten {
             if let Some(slots) = self.by_entry.remove(&e) {
                 // Only those whose record still names the entry.
@@ -155,23 +200,18 @@ impl<C: Clone> Picked<C> {
                 );
             }
         }
-        for (&slot, kept) in &self.slots {
-            if record(slot) != Some(kept.record) {
-                due.insert(slot);
-            }
-        }
+        due.extend(self.slots.iter().filter(|&(&slot, kept)| record(slot) != Some(kept.record)).map(|(&slot, _)| slot));
         let orphans_too = pass.is_multiple_of(ORPHANS_EVERY);
-        for (&slot, &seen) in &self.orphans {
-            if orphans_too || record(slot) != Some(seen) {
-                due.insert(slot);
-            }
-        }
-        let mut due: Vec<u32> = due.into_iter().collect();
+        due.extend(
+            self.orphans.iter().filter(|&(&slot, &seen)| orphans_too || record(slot) != Some(seen)).map(|(&slot, _)| slot),
+        );
         due.sort_unstable();
+        due.dedup();
         due
     }
 
-    fn record_of(&self, slot: u32) -> Option<Record> {
+    /// The record seen at slot `slot`'s last look, if it is kept.
+    pub(crate) fn record_of(&self, slot: u32) -> Option<Record> {
         self.slots
             .get(&slot)
             .map(|s| s.record)
@@ -203,7 +243,7 @@ impl<C: Clone> Picked<C> {
 
     /// Slot `slot` (with `record`, naming table entry `entry`) reads title
     /// memory `[from, to)` through host copy `copy` (`key`: its identity).
-    #[allow(clippy::too_many_arguments)] // what a slot holds, as the pass found it
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn keep(&mut self, slot: u32, key: usize, copy: &C, from: u64, to: u64, record: Record, entry: Option<u32>) {
         self.forget(slot);
         self.note_entry(slot, entry);
@@ -325,28 +365,6 @@ mod tests {
         Heap {
             records: (0..n).map(|s| (s, [1, 100 + s, 1])).collect(),
         }
-    }
-
-    /// A heap whose pass does not run is told of the freed entries at
-    /// every pass of the heap that does: it keeps only those its slots
-    /// name, at most [`FORGOTTEN_MOST`], and past that its next pass looks
-    /// at every slot (a review found 2,097,152 entries kept before).
-    #[test]
-    fn a_dormant_heap_keeps_few_forgotten_entries_and_falls_back_to_all() {
-        let heap = heap(64);
-        let mut p = Picked::new(false);
-        assert_eq!(pass(&mut p, &heap, vec![], vec![]).len(), 64);
-        let unnamed: Vec<u32> = (1_000_000..1_000_000 + 2_097_152).collect();
-        p.note_forgotten(Some(&unnamed));
-        assert_eq!(p.forgotten_len(), Some(0), "entries no slot names are not kept");
-        p.note_forgotten(Some(&[117]));
-        assert_eq!(p.forgotten_len(), Some(1));
-        assert_eq!(pass(&mut p, &heap, vec![], vec![]), vec![17]);
-        for _ in 0..=FORGOTTEN_MOST {
-            p.note_forgotten(Some(&[117]));
-        }
-        assert_eq!(p.forgotten_len(), None, "dropped past the bound");
-        assert_eq!(pass(&mut p, &heap, vec![], vec![]).len(), 64, "and every slot looked at");
     }
 
     #[test]

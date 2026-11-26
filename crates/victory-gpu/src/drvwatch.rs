@@ -23,15 +23,6 @@ use windows_sys::Win32::System::EventLog::{
     EVT_HANDLE, EVT_SUBSCRIBE_NOTIFY_ACTION, EvtSubscribe, EvtSubscribeActionDeliver, EvtSubscribeToFutureEvents,
 };
 
-// Display also reports the informational Auto HDR prompt. Keep recovery events
-// from that provider and suppress only the prompt.
-const QUERY: &str = r#"<QueryList>
-    <Query Id="0" Path="System">
-        <Select Path="System">*[System[Provider[@Name='nvlddmkm' or @Name='amdkmdag' or @Name='amdwddmg' or @Name='igfx' or @Name='igfxn' or @Name='Display']]]</Select>
-        <Suppress Path="System">*[System[Provider[@Name='Display'] and EventID=4127 and Level=4]]</Suppress>
-    </Query>
-</QueryList>"#;
-
 /// Entries of a display driver seen since the start.
 static ERRORS: AtomicU64 = AtomicU64::new(0);
 /// Whether one was seen ([`tripped`]).
@@ -70,6 +61,11 @@ unsafe extern "system" fn on_event(action: EVT_SUBSCRIBE_NOTIFY_ACTION, _context
     0
 }
 
+/// The entries [`start`] subscribes to: the display drivers' and the
+/// `Display` source's, at levels 1-3 (critical, error, warning).
+const QUERY: &str = "*[System[Provider[@Name='nvlddmkm' or @Name='amdkmdag' or @Name='amdwddmg' or @Name='igfx' \
+                     or @Name='igfxn' or @Name='Display'] and (Level=1 or Level=2 or Level=3)]]";
+
 /// Subscribes to the display drivers' entries in the system's event log,
 /// once. Entries from before the call are not delivered.
 pub(crate) fn start() {
@@ -79,6 +75,15 @@ pub(crate) fn start() {
             return;
         }
         let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let channel = wide("System");
+        // The kernel drivers of the three vendors, and the system's own
+        // "display driver stopped responding" source (4101, a warning).
+        // Critical, error and warning entries only: the `Display` source
+        // also writes information entries that are no fault, among them
+        // 4125, the Auto HDR notice ("Good news-… has been enhanced"),
+        // which Windows 11 writes when a game's window first shows. On a
+        // machine with Auto HDR on it tripped the switch a second into
+        // every run, and the draw windows were off from the start.
         let query = wide(QUERY);
         // SAFETY: valid strings for the call's length; the callback is a
         // plain function that touches only statics; the subscription is
@@ -87,7 +92,7 @@ pub(crate) fn start() {
             EvtSubscribe(
                 0,
                 std::ptr::null_mut(),
-                std::ptr::null(),
+                channel.as_ptr(),
                 query.as_ptr(),
                 0,
                 std::ptr::null(),
@@ -178,14 +183,11 @@ mod tests {
     /// query (a query it cannot read is refused at once).
     #[test]
     fn the_system_takes_the_subscription() {
-        unsafe extern "system" fn ignore(_: EVT_SUBSCRIBE_NOTIFY_ACTION, _: *const core::ffi::c_void, _: EVT_HANDLE) -> u32 {
-            0
-        }
         let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-        let query = wide(QUERY);
+        let (channel, query) = (wide("System"), wide(QUERY));
         // SAFETY: as in `start`.
         let subscription = unsafe {
-            EvtSubscribe(0, std::ptr::null_mut(), std::ptr::null(), query.as_ptr(), 0, std::ptr::null(), Some(ignore), EvtSubscribeToFutureEvents)
+            EvtSubscribe(0, std::ptr::null_mut(), channel.as_ptr(), query.as_ptr(), 0, std::ptr::null(), Some(on_event), EvtSubscribeToFutureEvents)
         };
         assert_ne!(subscription, 0, "{}", std::io::Error::last_os_error());
         // SAFETY: our own subscription.

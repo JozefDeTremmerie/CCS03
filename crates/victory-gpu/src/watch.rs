@@ -2356,3 +2356,21 @@ mod mapping_tests {
         assert!(changed.load(Ordering::SeqCst));
     }
 }
+
+/// victory-fork's light refresh (`VICTORY_LIGHT_REFRESH`) is not kept here:
+/// CCS03's guards keep their own clean blocks. Off, as it is upstream by
+/// default.
+pub(crate) fn light() -> bool {
+    false
+}
+
+/// See [`light`]: never answered here, so the copy is refreshed.
+pub(crate) fn nothing_new(_start: usize, _end: usize, _base: usize, _copied: &[u64]) -> bool {
+    false
+}
+
+/// victory-fork's `VICTORY_VIEW_KNOWN` asking (measured at no gain there):
+/// never answered here, so the copy is refreshed.
+pub(crate) fn unchanged_known(_start: usize, _end: usize, _base: usize, _copied: &[u64]) -> bool {
+    false
+}

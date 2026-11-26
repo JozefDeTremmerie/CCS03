@@ -1390,6 +1390,16 @@ fn give_back(v: Vec<u8>) {
 
 const NOT_WATCHED: u8 = 2;
 
+/// [`Shadow::update_free`]'s counter (fps41 round 8): refreshes that copied
+/// nothing are also looked at for being known unchanged before asking
+/// (`VICTORY_REFRESH_COUNT=1`; off by default: the look takes the
+/// journal's and the guards' locks once more a refresh).
+#[cfg(feature = "diagnostics")]
+fn refresh_count() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_REFRESH_COUNT").is_some_and(|v| v == "1"))
+}
+
 // Fixed-size equality compiles to two SIMD comparisons on Windows x64.
 // Only the first or last unequal chunk needs a byte-wise search.
 const DIFF_CHUNK: usize = 32;
@@ -1965,6 +1975,18 @@ fn mask_runs(mask: &[u8], runs: &mut Vec<(usize, usize)>) {
 /// Since the last frame-rate line, of [`Shadow::merge_under_writes`]: pages
 /// compared, changed runs put in, and their bytes.
 static MERGED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// Why [`Shadow::merge_under_writes`] gave up (the flights are then
+/// settled whole, 64 to 94 ms each in run 282), since they were last
+/// taken: the copy's memory is not watched; the write tracking had no
+/// answer for the range; more changed runs than `VICTORY_MERGE_RUNS`
+/// leaves; a copy in PC memory without its snapshot.
+static MERGE_GAVE_UP: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// [`MERGE_GAVE_UP`], taken.
+pub(crate) fn merge_gave_up() -> [u64; 4] {
+    [0, 1, 2, 3].map(|i| MERGE_GAVE_UP[i].swap(0, Ordering::Relaxed))
+}
 
 /// [`MERGED`], taken.
 pub(crate) fn merged_stats() -> [u64; 3] {
@@ -2683,16 +2705,26 @@ pub(crate) fn let_go_idle() {
             return;
         }
         let idle_ms = crate::host::ram_idle_ms(crate::host::available_physical_ram());
-        let idle: Vec<(u64, u64)> = map
-            .iter()
-            .filter(|(_, s)| {
-                Arc::strong_count(s) == 1
-                    && crate::host::long_ago(s.used.load(Ordering::Relaxed), idle_ms, IDLE_FRAMES)
-                    && crate::host::references(&s.buffer) == 1
-            })
-            .map(|(key, _)| *key)
-            .collect();
-        idle.into_iter().filter_map(|key| map.remove(&key)).collect()
+        let idle = |s: &Arc<Shadow>| {
+            Arc::strong_count(s) == 1
+                && crate::host::long_ago(s.used.load(Ordering::Relaxed), idle_ms, IDLE_FRAMES)
+                && crate::host::references(&s.buffer) == 1
+        };
+        let keys: Vec<(u64, u64)> = map.iter().filter(|(_, s)| idle(s)).map(|(key, _)| *key).collect();
+        // Counted before they leave the table, with its lock held, and
+        // each looked at AGAIN after the count ([`TABLES_CHANGED`]): a
+        // thread that took one from its own memory of asks before the
+        // count moved holds it by now, and it stays.
+        if !keys.is_empty() {
+            tables_changed();
+        }
+        let mut gone = Vec::new();
+        for key in keys {
+            if map.get(&key).is_some_and(&idle) {
+                gone.extend(map.remove(&key));
+            }
+        }
+        gone
     };
     if !gone.is_empty() {
         let (went, bytes) = (gone.len(), gone.iter().map(|s| s.len).sum::<u64>());
@@ -2866,6 +2898,10 @@ impl Shadow {
     /// before the submission (a copy per declared range and submission);
     /// a GPU-side dirty mask would save that if big ranges make it slow.
     pub(crate) fn gpu_writes(self: &Arc<Self>, list: &HostList, address: u64, len: u64) {
+        // The list's prelude takes no record of this copy from here on
+        // (`crate::indirect::gather_by_copy`); a copy in place is written
+        // by the shaders as any other.
+        list.gather_wrote(self.id);
         // In place the shaders write title memory itself: no snapshot, no
         // compare, nothing to copy back, and no wait on its account.
         // shortcut: another host copy of the same bytes (a title buffer
@@ -3462,6 +3498,7 @@ impl Shadow {
             return false;
         }
         if self.watched.load(Ordering::Relaxed) == NOT_WATCHED {
+            MERGE_GAVE_UP[0].fetch_add(1, Ordering::Relaxed);
             return true;
         }
         let base = start / PAGE;
@@ -3474,6 +3511,7 @@ impl Shadow {
             // those were all of run 99's cases: the flights were settled
             // 4-5 times a frame for "0 pages looked at".
             let Some((now, written)) = crate::watch::writes(a, e, true) else {
+                MERGE_GAVE_UP[1].fetch_add(1, Ordering::Relaxed);
                 return true;
             };
             let stale: Vec<usize> = {
@@ -3509,6 +3547,7 @@ impl Shadow {
                     let held = unsafe { std::slice::from_raw_parts_mut(self.data.add(at), n) };
                     let runs = joined_over(changed_runs(title, held), merge_gap());
                     if runs.len() > *runs_left {
+                        MERGE_GAVE_UP[2].fetch_add(1, Ordering::Relaxed);
                         return true;
                     }
                     *runs_left -= runs.len();
@@ -3520,6 +3559,7 @@ impl Shadow {
                     }
                 } else {
                     let Some(snapshot) = before.as_mut() else {
+                        MERGE_GAVE_UP[3].fetch_add(1, Ordering::Relaxed);
                         return true;
                     };
                     // SAFETY: the snapshot's allocation holds the copy's
@@ -3596,9 +3636,44 @@ impl Shadow {
     /// shader writes.
     fn update_free(&self, from: usize, to: usize) -> usize {
         if self.watched.load(Ordering::Relaxed) != NOT_WATCHED {
+            // The light refresh (`VICTORY_LIGHT_REFRESH`): nothing of the
+            // range was written that the copy does not hold, and the
+            // journal says so with nothing asked.
+            if crate::watch::light() && self.nothing_new(from, to) {
+                self.refresh_check(from, to);
+                #[cfg(feature = "diagnostics")]
+                {
+                    use crate::copystat::{C, add};
+                    add(C::Checked, (to - from) as u64);
+                    add(C::Unchanged, (to - from) as u64);
+                }
+                return 0;
+            }
+            // The counter of fps41 round 8: copied nothing or something,
+            // and (with `VICTORY_REFRESH_COUNT=1`) whether it was known
+            // unchanged before asking. Looked at before the asking, which
+            // changes the guards and the journal.
+            #[cfg(feature = "diagnostics")]
+            let (asking, known) = (std::time::Instant::now(), refresh_count() && self.unchanged_known(from, to));
             if let Some((now, written)) = crate::watch::writes(from, to, true) {
                 self.watched.store(1, Ordering::Relaxed);
                 let copied = self.copy_stale(from, to, now, &written);
+                #[cfg(feature = "diagnostics")]
+                {
+                    use crate::copystat::{C, add};
+                    let us = asking.elapsed().as_micros() as u64;
+                    if copied == 0 {
+                        add(C::RefreshNone, 1);
+                        add(C::RefreshNoneUs, us);
+                        if known {
+                            add(C::RefreshKnown, 1);
+                            add(C::RefreshKnownUs, us);
+                        }
+                    } else {
+                        add(C::RefreshSome, 1);
+                        add(C::RefreshSomeUs, us);
+                    }
+                }
                 self.refresh_check(from, to);
                 #[cfg(feature = "diagnostics")]
                 {
@@ -3618,6 +3693,31 @@ impl Shadow {
         #[cfg(feature = "diagnostics")]
         crate::copystat::whole(from, to - from, started.elapsed().as_micros() as u64);
         to - from
+    }
+
+    /// Whether a refresh of `[from, to)` would copy nothing, known before
+    /// asking (`crate::watch::unchanged_known`); `false` for a copy not
+    /// known to be watched yet.
+    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+    fn unchanged_known(&self, from: usize, to: usize) -> bool {
+        if self.watched.load(Ordering::Relaxed) != 1 {
+            return false;
+        }
+        let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        crate::watch::unchanged_known(from, to, self.start as usize / PAGE, &copied)
+    }
+
+    /// Whether [`Shadow::update_free`] of `[from, to)` would copy nothing,
+    /// known without asking the kernel or the guards
+    /// (`crate::watch::nothing_new`): the memory is watched, every page of
+    /// the range was taken, and none was noted written after it was.
+    /// `false` if the refresh would have to ask.
+    fn nothing_new(&self, from: usize, to: usize) -> bool {
+        if self.watched.load(Ordering::Relaxed) != 1 {
+            return false;
+        }
+        let copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        crate::watch::nothing_new(from, to, self.start as usize / PAGE, &copied)
     }
 
     /// Diagnostic (`VICTORY_REFRESH_CHECK=1`; off by default): after a
@@ -4081,18 +4181,25 @@ fn buffers_write() -> std::sync::RwLockWriteGuard<'static, BTreeMap<(u64, usize)
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
-    buffers_write().insert(
+    let mut map = buffers_write();
+    map.insert(
         (start, resource),
         Entry {
             end: start + len,
             shadow: None,
         },
     );
+    // After the insert, with the table's lock still held ([`TABLES_CHANGED`];
+    // fork pull request #1245: said before it, a thread that asked between
+    // the two kept the old table's answer under the new count for good).
+    tables_changed();
 }
 
 /// The title released it; lists that still hold its copy keep it alive.
 pub(crate) fn unregister(resource: usize, start: u64) {
-    buffers_write().remove(&(start, resource));
+    let mut map = buffers_write();
+    tables_changed();
+    map.remove(&(start, resource));
 }
 
 /// The title buffer holding `address`, as (start, length), without making
@@ -4121,14 +4228,21 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
             .filter(|(key, shadow)| shadow.place.is_some() && key.0 + key.1 > at)
             .map(|(key, _)| *key)
             .collect();
+        if !keys.is_empty() {
+            tables_changed();
+        }
         gone.extend(keys.into_iter().filter_map(|key| map.remove(&key)));
     }
     {
         // As `lookup` finds a buffer: among the 256 that start below.
         let mut map = buffers_write();
-        for (_, entry) in map.range_mut(..(end, 0)).rev().take(256) {
-            if entry.end > at && entry.shadow.as_ref().is_some_and(|s| s.place.is_some()) {
-                gone.extend(entry.shadow.take());
+        let placed = |entry: &Entry| entry.end > at && entry.shadow.as_ref().is_some_and(|s| s.place.is_some());
+        if map.range(..(end, 0)).rev().take(256).any(|(_, entry)| placed(entry)) {
+            tables_changed();
+            for (_, entry) in map.range_mut(..(end, 0)).rev().take(256) {
+                if placed(entry) {
+                    gone.extend(entry.shadow.take());
+                }
             }
         }
     }
@@ -4181,7 +4295,173 @@ pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
     lookup(address, len, true)
 }
 
+/// Counts the changes of the tables [`lookup`] reads that can change what an
+/// ask finds: a buffer registered or released, a copy taken out of a table,
+/// a window made. A thread's remembered answers ([`FOUND`]) are from one
+/// count.
+///
+/// The order that makes a thread's remembered answer safe with no lock on
+/// a remembered ask: a copy that LEAVES a table is counted before it
+/// leaves, an entry that COMES is counted after it is in, both with the
+/// table's lock held; and a thread that finds a remembered answer looks at
+/// the count again before it uses it ([`lookup`]). So an answer used was
+/// the tables' own at the moment of that second look, or a moment before
+/// a change that had not been made yet: what an ask of the tables just
+/// ahead of the change would have found. The idle sweep, which lets go
+/// only what nobody holds, looks at each copy's holders again after it
+/// counted: the thread took its handle and then read the count, the sweep
+/// counts and then reads the holders, so one of the two sees the other.
+/// (That last step leans on the processor: the handle's count is the
+/// standard library's, whose orderings are not ours to choose; on x86-64,
+/// the only processor the layer runs on, taking a handle and adding to the
+/// count are both locked instructions, which is what it needs.)
+static TABLES_CHANGED: AtomicU64 = AtomicU64::new(0);
+
+fn tables_changed() {
+    TABLES_CHANGED.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::{TABLES_CHANGED, buffers_read, register, unregister};
+    use std::sync::{Barrier, atomic::Ordering};
+    use std::time::{Duration, Instant};
+
+    /// A registration that waits for the table's lock has not counted yet:
+    /// who reads the old table reads it under the old count (fork pull
+    /// request #1245's test).
+    #[test]
+    fn a_pending_registration_invalidates_readers_of_the_old_table() {
+        // No card: the address of a stack slot is the key.
+        let slot = 0u64;
+        let start = (&raw const slot) as u64;
+        let resource = start as usize;
+        let table = buffers_read();
+        let initial = TABLES_CHANGED.load(Ordering::Acquire);
+        let ready = Barrier::new(2);
+        let observed = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                ready.wait();
+                register(resource, start, 8);
+            });
+            ready.wait();
+            // Time for a writer that counted before taking the lock to
+            // show it; a right one stays blocked all the while.
+            let deadline = Instant::now() + Duration::from_millis(50);
+            while TABLES_CHANGED.load(Ordering::Acquire) == initial && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            let count = TABLES_CHANGED.load(Ordering::Acquire);
+            assert!(!table.contains_key(&(start, resource)));
+            drop(table);
+            count
+        });
+        let committed = TABLES_CHANGED.load(Ordering::Acquire);
+        unregister(resource, start);
+        assert_ne!(committed, observed, "the old table still has the current count");
+    }
+}
+
+/// Since the last frame line: asks answered from a thread's own memory of
+/// them, and asks that went to the tables.
+pub(crate) static LOOKUPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Whether a thread remembers what its asks found (fork pull request
+/// #1237; `VICTORY_LOOKUP_CACHE=1`).
+///
+/// Every bind of a draw asks for the host copy of each buffer it reads:
+/// under the tables' one lock, among the 64 buffers that start below the
+/// address, then, for memory outside buffers, under the windows' lock. The
+/// title's six recording threads spent 54 ms a frame there together in the
+/// prologue cell (`VICTORY_PROFILE`), and asked for the same ranges again
+/// and again. A thread now keeps what each ask (address, length, kind)
+/// found, weakly (a copy nothing else holds can still be let go), for as
+/// long as the tables have not changed ([`TABLES_CHANGED`]).
+///
+/// Here: OFF unless `VICTORY_LOOKUP_CACHE=1` until a run of ours has carried
+/// it (the pull request has it on by default); `alt`: twenty seconds with,
+/// twenty without, in turn, each change said in the log.
+fn lookup_cache() -> bool {
+    /// 0 off, 1 on, 2 in turn.
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    match *MODE.get_or_init(|| match std::env::var("VICTORY_LOOKUP_CACHE").as_deref() {
+        Ok("1") => 1,
+        Ok("alt") => 2,
+        _ => 0,
+    }) {
+        0 => false,
+        1 => true,
+        _ => {
+            static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            let on = (EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs() / 20) % 2 == 1;
+            static LAST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+            if LAST.swap(u8::from(on), Ordering::Relaxed) != u8::from(on) {
+                tracing::info!(
+                    "a thread remembers what its asks for a buffer's host copy found from now (VICTORY_LOOKUP_CACHE=alt): {}",
+                    if on { "ON" } else { "off, every ask goes to the tables as usual" }
+                );
+            }
+            on
+        }
+    }
+}
+
+/// The most asks a thread remembers before it starts again.
+const FOUND_MOST: usize = 8192;
+
+type Found = std::collections::HashMap<(u64, u64, bool), std::sync::Weak<Shadow>>;
+
+thread_local! {
+    /// What this thread's asks found, and the count of table changes they
+    /// are from.
+    static FOUND: std::cell::RefCell<(u64, Found)> = std::cell::RefCell::new((u64::MAX, Found::new()));
+}
+
 fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
+    if !lookup_cache() {
+        return lookup_tables(address, len, any);
+    }
+    let changes = TABLES_CHANGED.load(Ordering::Acquire);
+    let found = FOUND.with(|f| {
+        let f = &mut *f.borrow_mut();
+        if f.0 != changes {
+            f.1.clear();
+            f.0 = changes;
+        }
+        f.1.get(&(address, len, any)).and_then(std::sync::Weak::upgrade)
+    });
+    // (The count again: a copy the sweep is taking out of its table at
+    // this moment can still be alive for the weak handle.)
+    if let Some(shadow) = found.filter(|_| TABLES_CHANGED.load(Ordering::SeqCst) == changes) {
+        LOOKUPS[0].fetch_add(1, Ordering::Relaxed);
+        if shadow.window {
+            // As `loose` notes an ask of a window it hands out.
+            shadow.used.store(crate::host::moment(), Ordering::Relaxed);
+            shadow.asked[0].fetch_min(address, Ordering::Relaxed);
+            shadow.asked[1].fetch_max(address.saturating_add(len.max(1)), Ordering::Relaxed);
+            if len <= 1 {
+                shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        return Some(shadow);
+    }
+    LOOKUPS[1].fetch_add(1, Ordering::Relaxed);
+    let shadow = lookup_tables(address, len, any)?;
+    FOUND.with(|f| {
+        let f = &mut *f.borrow_mut();
+        // (from the count read before the tables were: a change since
+        // clears it at the next ask)
+        if f.0 == changes {
+            if f.1.len() >= FOUND_MOST {
+                f.1.clear();
+            }
+            f.1.insert((address, len, any), Arc::downgrade(&shadow));
+        }
+    });
+    Some(shadow)
+}
+
+fn lookup_tables(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
     let end = address.checked_add(len.max(1))?;
     // Fast path: the buffer found has its copy already (all but the first
     // ask for a buffer), so the ask only needs the read lock.
@@ -4450,6 +4730,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         let shadow = Arc::new(Shadow::placed(placed, start, len, true));
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        tables_changed();
         return Some(shadow);
     }
     // In a GPU upload heap, if asked for and there is room: one buffer in
@@ -4464,6 +4745,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
         let shadow = Arc::new(shadow);
         note(&shadow);
         map.insert((start, len), shadow.clone());
+        tables_changed();
         return Some(shadow);
     }
     let (buffer, data) = host()?.shared_buffer(len)?;
@@ -4502,6 +4784,7 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     }
     note(&shadow);
     map.insert((start, len), shadow.clone());
+    tables_changed();
     Some(shadow)
 }
 
