@@ -1369,10 +1369,44 @@ extern "system" fn present(
     {
         crate::framelog::add(crate::framelog::T::PresentUs, presenting.elapsed().as_micros() as u64);
         crate::framelog::frame();
+        game_clock_frame();
+        crate::watchprog::sample();
         #[cfg(feature = "diagnostics")]
         crate::fence::pace::frame();
     }
     hr
+}
+
+/// A present ends a frame of the title's clock (`VICTORY_GAME_STEP_MS`):
+/// every five seconds of the wall, what its frames counted for the title
+/// and on the wall.
+#[cfg(windows)]
+fn game_clock_frame() {
+    use std::sync::atomic::AtomicI64;
+    static SUMS: [AtomicI64; 3] = [const { AtomicI64::new(0) }; 3];
+    let Some(step) = victory_core::game_clock::frame() else {
+        return;
+    };
+    if step.wall == 0 {
+        return;
+    }
+    SUMS[0].fetch_add(1, Ordering::Relaxed);
+    SUMS[1].fetch_add(step.wall, Ordering::Relaxed);
+    let title = SUMS[2].fetch_add(step.title, Ordering::Relaxed) + step.title;
+    let wall = SUMS[1].load(Ordering::Relaxed);
+    let per_ms = victory_core::game_clock::frequency() as f64 / 1000.0;
+    if (wall as f64) < 5000.0 * per_ms {
+        return;
+    }
+    let frames = SUMS[0].swap(0, Ordering::Relaxed).max(1) as f64;
+    SUMS[1].store(0, Ordering::Relaxed);
+    SUMS[2].store(0, Ordering::Relaxed);
+    tracing::info!(
+        "game clock: {:.1} ms a frame for the title, {:.1} ms on the wall: the game runs at {:.0} % of real time (VICTORY_GAME_STEP_MS)",
+        title as f64 / per_ms / frames,
+        wall as f64 / per_ms / frames,
+        100.0 * title as f64 / wall.max(1) as f64
+    );
 }
 
 fn present_now(this: This, planes: u32, plane_parameters: *const Plane) -> HRESULT {

@@ -1,5 +1,6 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3); while none is connected, the keyboard drives one
+//! (host slots 0-3), a PlayStation 5 pad in the first slot while XInput has
+//! none there ([`dualsense`]); while none is connected, the keyboard drives one
 //! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
 //! too. A poll thread turns host state into readings (a new one per change)
 //! and runs device callbacks on connect and disconnect.
@@ -20,6 +21,9 @@ use std::time::{Duration, Instant};
 use super::xasync::{E_INVALIDARG, E_NOTIMPL};
 use super::xgameruntime::{HRESULT, S_OK};
 use crate::{HleExport, HleModule};
+
+#[cfg_attr(not(windows), allow(dead_code))]
+mod dualsense;
 
 /// The documented errors.
 pub const DEVICE_DISCONNECTED: HRESULT = 0x838A_0001_u32 as i32;
@@ -1130,10 +1134,42 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        /// A PlayStation 5 pad, looked for once XInput's first slot was
+        /// found empty.
+        sony: Option<super::dualsense::reader::Reader>,
     }
 
     impl Source for Host {
         fn pad(&mut self, slot: usize) -> Option<PadState> {
+            let pad = self.xinput_pad(slot);
+            if pad.is_some() || slot != 0 {
+                return pad;
+            }
+            self.sony.get_or_insert_with(super::dualsense::reader::Reader::start).pad()
+        }
+
+        fn keys(&mut self) -> Vec<KeyState> {
+            self.host_keys()
+        }
+
+        fn rumble(&mut self, slot: usize, low: u16, high: u16) {
+            let speeds = XINPUT_VIBRATION {
+                wLeftMotorSpeed: low,
+                wRightMotorSpeed: high,
+            };
+            // SAFETY: a valid vibration; an empty slot just fails.
+            let failed = unsafe { XInputSetState(slot as u32, &speeds) } != 0;
+            if failed
+                && slot == 0
+                && let Some(sony) = &self.sony
+            {
+                sony.rumble(low, high);
+            }
+        }
+    }
+
+    impl Host {
+        fn xinput_pad(&mut self, slot: usize) -> Option<PadState> {
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1161,7 +1197,7 @@ mod host {
             Some(pad)
         }
 
-        fn keys(&mut self) -> Vec<KeyState> {
+        fn host_keys(&mut self) -> Vec<KeyState> {
             #[cfg(feature = "diagnostics")]
             let mut down = scripted();
             #[cfg(not(feature = "diagnostics"))]
@@ -1191,15 +1227,6 @@ mod host {
                     ..Default::default()
                 })
                 .collect()
-        }
-
-        fn rumble(&mut self, slot: usize, low: u16, high: u16) {
-            let speeds = XINPUT_VIBRATION {
-                wLeftMotorSpeed: low,
-                wRightMotorSpeed: high,
-            };
-            // SAFETY: a valid vibration; an empty slot just fails.
-            unsafe { XInputSetState(slot as u32, &speeds) };
         }
     }
 

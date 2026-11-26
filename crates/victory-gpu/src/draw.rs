@@ -24,6 +24,10 @@ use crate::host::HostList;
 use crate::object::This;
 use crate::pipeline::host::HostPipeline;
 
+/// Bytes looked at behind a root view a watched program writes (its size
+/// is not bound with it).
+const LOOK_ROOT_VIEW: u64 = 4096;
+
 /// A root argument as the title set it.
 #[derive(Debug, Clone, Default)]
 enum Root {
@@ -2306,7 +2310,10 @@ impl State {
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
-        if self.ambient(list, p) {
+        self.watch_writes(p, Some([x, y, z]));
+        let ambient = self.ambient(list, p);
+        let reflections = self.reflections(list, p);
+        if ambient || reflections {
             // Our pass set its own heap, root signature and pipeline: the
             // next draw or dispatch sets the title's again (as `replay`).
             self.host_pipeline = 0;
@@ -2366,6 +2373,135 @@ impl State {
             _ => None,
         };
         crate::ambient::raise(list, light as This, depth)
+    }
+
+    /// After a dispatch of `p`: its reflections bent down to the light
+    /// around them, if it is the pass that keeps them ([`crate::reflect`]).
+    /// After a dispatch of `p`: the buffers it writes, if its program is
+    /// watched (`VICTORY_WATCH_PROGRAMS`, `crate::watchprog`).
+    /// `groups`: a direct dispatch's group counts (none: indirect).
+    fn watch_writes(&self, p: &crate::pipeline::host::HostPipeline, groups: Option<[u32; 3]>) {
+        if !crate::watchprog::on() {
+            return;
+        }
+        let Some(stage) = p.stages.first() else {
+            return;
+        };
+        let Some(program) = stage.shader.program_name() else {
+            return;
+        };
+        if !crate::watchprog::watched(&program) {
+            return;
+        }
+        crate::watchprog::dispatched(&program, groups);
+        let roots = self.roots_ref(true);
+        for u in stage.translated().used.iter().filter(|u| u.kind == ResourceType::Uav) {
+            let slot = format!("{:?} {}/{}", u.root, u.slot, u.table_offset_dwords);
+            match roots.get(usize::from(u.slot)) {
+                Some(Root::View(address)) if u.root == RootType::Descriptor => {
+                    crate::watchprog::note(&program, slot, *address, LOOK_ROOT_VIEW);
+                }
+                Some(Root::Table(table)) if u.root == RootType::Table => {
+                    let at = table + u64::from(u.table_offset_dwords) * 4;
+                    let (bytes, size, desc) = match crate::descriptor::view(at) {
+                        Some(View::Unordered(r, _, desc)) => {
+                            let Some((bytes, size)) = crate::resource::buffer_bytes(r as This)
+                            else {
+                                continue;
+                            };
+                            (bytes as u64, size, desc)
+                        }
+                        // Memory the title placed a buffer in: the address
+                        // follows the plain view (`descriptor::shape_of`),
+                        // the width is the resource's.
+                        Some(View::Placed(true, resource, desc)) if resource[0] == 1 => {
+                            let address = u64::from(desc[10]) | (u64::from(desc[11]) << 32);
+                            let width = u64::from(resource[4]) | (u64::from(resource[5]) << 32);
+                            let mut plain = [0u32; 10];
+                            plain.copy_from_slice(&desc[..10]);
+                            (address, width, Some(plain))
+                        }
+                        _ => continue,
+                    };
+                    // D3D12 buffer view: format, dimension, first element
+                    // (two words), count, stride.
+                    let (first, count, stride, format) = desc.map_or((0, 0, 0, 0), |d| {
+                        let first = u64::from(d[2]) | (u64::from(d[3]) << 32);
+                        (first, u64::from(d[4]), u64::from(d[5]), d[0])
+                    });
+                    let element = if stride > 0 {
+                        stride
+                    } else {
+                        crate::resource::element(format).map_or(4, |(b, _)| b)
+                    };
+                    let start = (first * element).min(size);
+                    let left = size - start;
+                    let length = if count > 0 { (count * element).min(left) } else { left };
+                    crate::watchprog::note(&program, slot, bytes + start, length);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn reflections(&self, list: &HostList, p: &crate::pipeline::host::HostPipeline) -> bool {
+        let Some(stage) = p.stages.first().filter(|s| s.shader.updates_reflections) else {
+            return false;
+        };
+        // Each program of that name once: what it writes through tables, so
+        // that the reflection image can be told apart if it is elsewhere.
+        {
+            static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+            if seen.len() < 16 && !seen.contains(&stage.shader.hash) {
+                seen.push(stage.shader.hash.clone());
+                let writes: Vec<String> = stage
+                    .translated()
+                    .used
+                    .iter()
+                    .filter(|u| u.kind == ResourceType::Uav)
+                    .map(|u| {
+                        let format = (u.root == RootType::Table)
+                            .then(|| self.roots_ref(true).get(usize::from(u.slot)))
+                            .flatten()
+                            .and_then(|r| match r {
+                                Root::Table(t) => Some(*t),
+                                _ => None,
+                            })
+                            .and_then(|t| crate::descriptor::view(t + u64::from(u.table_offset_dwords) * 4))
+                            .and_then(|v| match v {
+                                View::Unordered(r, ..) if r != 0 => crate::resource::host_resource(r as This),
+                                _ => None,
+                            })
+                            // SAFETY: a live resource.
+                            .map(|t| unsafe { t.GetDesc() })
+                            .map(|d| format!("{}x{} format {}", d.Width, d.Height, d.Format.0))
+                            .unwrap_or_else(|| "-".to_owned());
+                        format!("{:?} {}/{}: {format}", u.root, u.slot, u.table_offset_dwords)
+                    })
+                    .collect();
+                tracing::info!(hash = %stage.shader.hash, ?writes, "reflection knee: a history pass writes");
+            }
+        }
+        let (slot, offset) = crate::reflect::IMAGE;
+        let Some(u) = stage.translated().used.iter().find(|u| {
+            u.kind == ResourceType::Uav
+                && u.root == RootType::Table
+                && (u.slot, u.table_offset_dwords) == (slot, offset)
+        }) else {
+            return false;
+        };
+        let Some(Root::Table(table)) = self.roots_ref(true).get(usize::from(u.slot)) else {
+            once!("reflection knee: the history pass's table is not bound");
+            return false;
+        };
+        match crate::descriptor::view(table + u64::from(u.table_offset_dwords) * 4) {
+            Some(View::Unordered(r, ..)) if r != 0 => crate::reflect::bend(list, r as This),
+            _ => {
+                once!("reflection knee: no image in the history pass's slot");
+                false
+            }
+        }
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -3543,6 +3679,15 @@ impl State {
         // back (`crate::indirect`).
         if kind == DISPATCH {
             DISPATCHED.fetch_add(1, Ordering::Relaxed);
+            self.watch_writes(p, None);
+            // The title runs its reflections' history pass indirectly too.
+            if self.reflections(list, p) {
+                // Our pass set its own heap, root signature and pipeline:
+                // the next draw or dispatch sets the title's again.
+                self.host_pipeline = 0;
+                self.host_roots = [0; 2];
+                self.host_heaps = [0; 2];
+            }
         } else {
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
@@ -3689,6 +3834,8 @@ fn readable(list: &HostList, kind: ResourceType, view: &View) {
         (View::Unordered(resource, _, _), ResourceType::Uav) => {
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(*resource as This);
+            // Some compute-written textures are also read by the title CPU.
+            list.texture_written(*resource as This);
             // Unordered access to a depth texture is its colour twin's.
             if !list.twin_use(*resource as This, true, true) {
                 crate::list::ensure_state(list, *resource as This, UNORDERED_ACCESS);

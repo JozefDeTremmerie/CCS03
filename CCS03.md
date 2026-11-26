@@ -40,6 +40,13 @@ Windows with an NVIDIA GPU (32-lane waves).
 | CCS03 PR 27: victory-fork `main` at `0b0074e` (submit thread, copy queue, draw windows, copies in place, frame log) and its PR 823 (64-lane compute programs NVIDIA refused, page-mapping copies as one view) | fxceless, Felix2180 |
 | CCS03 PR 28: textures without their largest levels on 8 GB cards (`VICTORY_TEXTURE_DROP_MIPS`, from victory-fork PR 814); the indirect budget test no longer asks which draws win | staronthehorizon; CCS03 |
 | VIctory PR 684: shader tests find the PC compiler independently of the validator | Dathinel |
+| PlayStation 5 pads (DualSense, DualSense Edge) read as HID devices while XInput has no first pad, over USB or Bluetooth, rumble over USB | 9hvn9yt2vk-netizen |
+| Reflections bent down to the ambient light after the title's history pass (`VICTORY_REFLECT_KNEE`), after direct and indirect dispatches | 9hvn9yt2vk-netizen |
+| Failing shaders logged with the title's name for their program | 9hvn9yt2vk-netizen |
+| The Series S profile's water transmission programs on victory-fork's wave-wide list (they did not translate for 32-lane waves) | 9hvn9yt2vk-netizen |
+| `ccs03\play.ps1`: runs with the README's switches, keeps a log and a summary per run (`-Smooth`, `-Fast`, `-Low`, `-Diag`) | 9hvn9yt2vk-netizen |
+| The title's frames held to a steady step at low frame rates (`VICTORY_GAME_STEP_MS`, `play.ps1 -Steady`): its performance counter runs slower while frames are slow | 9hvn9yt2vk-netizen |
+| victory-fork `main` at `32b31f7`: textures shaders write that the title reads on the CPU copied back into title memory (`VICTORY_TEXTURE_BACK=1`, victory-fork PR 999: boats float), the card compare hashed by 64-thread groups (PR 1014, opt-in), notes about unmapped blocks (`VICTORY_ABSENT_ONCE`), the copy-back measured (`VICTORY_BACK_READS`, diagnostics); `title_memory_reading` with this tree's byte ranges | Geckomacabre, cxy0072019-sketch, martindevbr, fxceless; merge 9hvn9yt2vk-netizen |
 
 `README.md` is CCS03's own and links to victory-fork's README for the state
 of the title and the technical details. When merging victory-fork `main`,

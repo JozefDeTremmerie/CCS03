@@ -64,6 +64,10 @@ pub(crate) struct Shader {
     /// Its result gets the least indirect light ([`crate::ambient`]).
     #[cfg(windows)]
     pub(crate) resolves_light: bool,
+    /// Its reflections are bent down to the light around them
+    /// ([`crate::reflect`]).
+    #[cfg(windows)]
+    pub(crate) updates_reflections: bool,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
     /// Whether its code walks the ray-tracing structures, once looked at
@@ -74,7 +78,40 @@ pub(crate) struct Shader {
 
 impl std::fmt::Debug for Shader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.stage, self.hash)
+        write!(f, "{} {}", self.stage, self.hash)?;
+        if let Some(name) = self.program_name() {
+            write!(f, " {name}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Shader {
+    /// The title's own name for the program, if its container holds one
+    /// (`CS_ScreenProbes_TemporalResolve_...`, `ps_sky_paraboloid_reflection`):
+    /// the first run of letters, digits and underscores that starts with a
+    /// stage's prefix and is at least 8 long. Only for logs.
+    pub(crate) fn program_name(&self) -> Option<String> {
+        const PREFIXES: [&[u8]; 16] = [
+            b"CS_", b"PS_", b"VS_", b"MS_", b"AS_", b"GS_", b"HS_", b"DS_", b"cs_", b"ps_", b"vs_",
+            b"ms_", b"as_", b"gs_", b"hs_", b"ds_",
+        ];
+        let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = &self.container;
+        let mut at = 0;
+        while at < bytes.len() {
+            if !word(bytes[at]) {
+                at += 1;
+                continue;
+            }
+            let end = bytes[at..].iter().position(|&b| !word(b)).map_or(bytes.len(), |n| at + n);
+            let run = &bytes[at..end];
+            if run.len() >= 8 && PREFIXES.iter().any(|p| run.starts_with(p)) {
+                return Some(String::from_utf8_lossy(run).into_owned());
+            }
+            at = end;
+        }
+        None
     }
 }
 
@@ -122,6 +159,16 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 resolves_light: bytes
                     .windows(crate::ambient::PROGRAM.len())
                     .any(|w| w == crate::ambient::PROGRAM),
+                #[cfg(windows)]
+                updates_reflections: {
+                    let found = bytes
+                        .windows(crate::reflect::PROGRAM.len())
+                        .any(|w| w == crate::reflect::PROGRAM);
+                    if found {
+                        tracing::info!(stage, hash = %&full.to_hex()[..16], "reflection knee: a history pass");
+                    }
+                    found
+                },
                 #[cfg(windows)]
                 translated: OnceLock::new(),
                 #[cfg(windows)]
@@ -175,6 +222,7 @@ impl Shader {
                     Err(e) => tracing::warn!(
                         stage = self.stage,
                         hash = %self.hash,
+                        program = self.program_name().unwrap_or_default(),
                         error = %e,
                         "shader does not translate; its pipelines' draws are dropped"
                     ),

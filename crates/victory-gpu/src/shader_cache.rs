@@ -134,8 +134,21 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
 /// such a host (the driver refuses their 64-lane form: water transmission
 /// volumetrics, both kinds; particle visibility; the tiling of the
 /// screen-space reflection pass). `VICTORY_WAVE_WIDE_ONLY=none` allows none.
+/// The title's Series S profile passes containers of its own for the two
+/// water transmission programs (`CS_TransmissionVolumetrics` and
+/// `CS_TransmissionVolumetricsSubmerged`, the last two): without the wave-wide
+/// form their translation stops at a lane mask holding lanes elsewhere read
+/// as data, and with it the submerged one comes out with 32-lane waves
+/// (offline, the container as the title passes it on the RTX 4060 laptop).
 static WAVE_WIDE: OnceLock<Vec<String>> = OnceLock::new();
-const WAVE_WIDE_DEFAULT: [&str; 4] = ["5dc3b25986622949", "6f225b641c5b0708", "369cbe906ea72764", "2cc4c197ee29e291"];
+const WAVE_WIDE_DEFAULT: [&str; 6] = [
+    "5dc3b25986622949",
+    "6f225b641c5b0708",
+    "369cbe906ea72764",
+    "2cc4c197ee29e291",
+    "6871d6e4b3ac9a10",
+    "926c46bab3b86bd6",
+];
 
 /// The containers whose first-lane reads where not every lane runs take the
 /// host wave's own first lane (`victory_shader::emit::with_firstlane_own`):
