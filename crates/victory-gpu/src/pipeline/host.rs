@@ -720,7 +720,14 @@ impl HostPipeline {
                     return None;
                 }
             };
-            tracing::info!(?shaders, "host pipeline");
+            if victory_shader::emit::paired_compute_enabled() {
+                // The dispatch grid counts guest groups. Each translated group
+                // still executes all its guest threads, including for ExecuteIndirect.
+                let lanes = stages[0].0.translated().and_then(|t| wave_lanes(&t.host.dxil));
+                tracing::info!(?shaders, wave_lanes = ?lanes, "host compute pipeline");
+            } else {
+                tracing::info!(?shaders, "host pipeline");
+            }
             crate::host::name(&pso, || format!("{shaders:?}"));
             return Some(HostPipeline {
                 compute: true,
