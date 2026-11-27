@@ -3765,7 +3765,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                         // buffer of its own, four a frame, 43 to 60 ms a
                         // frame) and neither side had other bytes after
                         // one. A copy INTO such a range still waits.
-                        if !touches(written, dst, dst + len) && fill_ahead::on() {
+                        if !touches(written, dst, dst + len) && fill_ahead::ahead(src, len) {
                             if count {
                                 fill_ahead::read(src, len);
                             }
@@ -3783,7 +3783,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                     if touches(written, src, src + len) {
                         // Not waited for, and checked when the flights land
                         // (`fill_ahead`).
-                        if fill_ahead::on() {
+                        if fill_ahead::ahead(src, len) {
                             if count {
                                 fill_ahead::read(src, len);
                             }
@@ -3848,8 +3848,14 @@ mod fill_ahead {
     /// every present that waits).
     const KEEP: u64 = 16;
 
-    /// A flight changed bytes a fill had read ahead of it: fills wait.
-    static WAIT: AtomicBool = AtomicBool::new(false);
+    /// The 64 KiB pieces where a flight changed bytes a fill had read ahead
+    /// of it: fills of those pieces wait for the flights that may write
+    /// them. It was one switch for all fills: after the first such piece,
+    /// every fill under a flight waited for the card to run all it had (in
+    /// the prologue, 15 waits and 170-590 ms a frame).
+    static WAITING: Mutex<Option<std::collections::HashSet<usize>>> = Mutex::new(None);
+    /// Whether any piece is in [`WAITING`] (checked before its lock).
+    static ANY_WAITING: AtomicBool = AtomicBool::new(false);
     /// Since the last frame line: fills that read ahead; landings' writes
     /// that touched one's piece. Since the start: fills that read bytes a
     /// flight then changed.
@@ -3878,9 +3884,24 @@ mod fill_ahead {
 
     static READ: Mutex<Option<HashMap<usize, Piece>>> = Mutex::new(None);
 
-    pub(super) fn on() -> bool {
+    fn on() -> bool {
         static ON: OnceLock<bool> = OnceLock::new();
-        *ON.get_or_init(|| std::env::var_os("VICTORY_FILL_WAIT").is_none_or(|v| v != "1")) && !WAIT.load(Relaxed)
+        *ON.get_or_init(|| std::env::var_os("VICTORY_FILL_WAIT").is_none_or(|v| v != "1"))
+    }
+
+    /// Whether a fill (or a copy's source) of `len` bytes at `src` under
+    /// flights reads ahead of them, unwaited: not where a flight was seen to
+    /// change bytes a fill had read (`VICTORY_FILL_WAIT=1`: never).
+    pub(super) fn ahead(src: usize, len: usize) -> bool {
+        if !on() {
+            return false;
+        }
+        if len == 0 || !ANY_WAITING.load(Relaxed) {
+            return true;
+        }
+        let waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(set) = waiting.as_ref() else { return true };
+        !(src / PIECE..=(src + len - 1) / PIECE).any(|piece| set.contains(&piece))
     }
 
     /// A fill reads `len` bytes at `src` ahead of flights that may write
@@ -3906,7 +3927,7 @@ mod fill_ahead {
     /// A landing is about to put `new` into title memory at `at`: bytes
     /// shaders wrote, merged into the title's.
     pub(crate) fn wrote(at: usize, new: &[u8]) {
-        if new.is_empty() || WAIT.load(Relaxed) {
+        if new.is_empty() {
             return;
         }
         let frame = crate::frame::current();
@@ -3938,11 +3959,19 @@ mod fill_ahead {
             }
             let n = COUNT[2].fetch_add(1, Relaxed) + 1;
             let first = now.iter().zip(&new[a - at..b - at]).position(|(x, y)| x != y).unwrap_or(0);
-            if !WAIT.swap(true, Relaxed) {
+            let (added, pieces) = {
+                let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+                let set = waiting.get_or_insert_with(Default::default);
+                let before = set.len();
+                set.extend(from / PIECE..=(to - 1) / PIECE);
+                ANY_WAITING.store(true, Relaxed);
+                (set.len() - before, set.len())
+            };
+            if n <= 16 || n.is_power_of_two() {
                 tracing::warn!(
                     "a fill of upload memory read {} bytes at {from:#x} in frame {read_in} ahead of a flight whose shaders changed \
                      them (first at {:#x}, landed in frame {frame}): the lists of that submission drew with the bytes from before. \
-                     Fills wait for flights again from here on, as with VICTORY_FILL_WAIT=1 ({n} such fills)",
+                     Fills of those 64 KiB wait for flights from here on ({added} more pieces, {pieces} in all; {n} such fills)",
                     to - from,
                     a + first
                 );
@@ -3975,7 +4004,10 @@ mod fill_ahead {
             ahead as f64 / frames,
             looked as f64 / frames,
             COUNT[2].load(Relaxed),
-            if WAIT.load(Relaxed) { " (fills wait again)" } else { "" }
+            match WAITING.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |set| set.len()) {
+                0 => String::new(),
+                n => format!(" ({n} pieces of 64 KiB whose fills wait)"),
+            }
         );
     }
 }
@@ -4782,6 +4814,21 @@ fn late_line(frames: f64) {
     #[cfg(feature = "diagnostics")]
     fill_check::line();
     fill_ahead::line(frames);
+    {
+        static SEEN: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        let [direct, filled] = [0, 1].map(|i| {
+            let now = crate::draw::CONSTANT_VIEWS[i].load(Ordering::Relaxed);
+            now - SEEN[i].swap(now, Ordering::Relaxed)
+        });
+        if direct + filled > 0 {
+            tracing::info!(
+                "table constant views per frame: {:.1} read on the title memory's host copy, {:.1} filled into upload memory \
+                 (VICTORY_DIRECT_CONSTANTS=0: all filled)",
+                direct as f64 / frames,
+                filled as f64 / frames
+            );
+        }
+    }
     let pressure = COMPARE_PRESSURE[0].swap(0, Ordering::Relaxed);
     let wait_us = COMPARE_PRESSURE[1].swap(0, Ordering::Relaxed);
     if pressure != 0 || wait_us != 0 {
