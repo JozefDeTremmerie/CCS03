@@ -545,10 +545,10 @@ impl Spans {
 /// has them mapped; `crate::watch::title_memory_written`), since a texture
 /// pass last took the ranges ([`page_written`]). Kept apart from
 /// [`REMAPPED`] so that what such writes do is counted by itself.
-static PAGE_WRITTEN: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+static PAGE_WRITTEN: Mutex<Ranges> = Mutex::new(Ranges::new());
 
-/// Since the start: such ranges kept for a pass; ranges dropped because no
-/// pass took them; slots of placed textures that held bytes of them when a
+/// Since the start: such ranges kept for a pass; ranges widened at
+/// capacity; slots of placed textures that held bytes of them when a
 /// pass took them; of those, the slots whose texture had been uploaded
 /// before the write (out of the queue, or in it after an upload): they are
 /// the ones that kept the bytes from before, and the ones made due when
@@ -568,30 +568,24 @@ const PAGE_WRITE_AFTER: u64 = 2;
 /// ranges; locks one mutex and calls nothing.
 pub(crate) fn page_written(at: usize, len: usize) {
     use std::sync::atomic::Ordering::Relaxed;
-    /// Ranges kept until a pass takes them.
-    const MOST: usize = 1 << 15;
     let (start, end) = (at as u64, at.saturating_add(len) as u64);
     if end <= SPANNED[0].load(Relaxed) || start >= SPANNED[1].load(Relaxed) {
         return;
     }
     let mut ranges = PAGE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
     PAGE_WRITES[0].fetch_add(1, Relaxed);
-    if let Some(last) = ranges.last_mut()
-        && last.1 == start
-    {
-        last.1 = end;
-        return;
+    if ranges.insert(start, end) {
+        PAGE_WRITES[1].fetch_add(1, Relaxed);
     }
-    if ranges.len() >= MOST {
-        PAGE_WRITES[1].fetch_add(ranges.len() as u64, Relaxed);
-        ranges.clear();
-    }
-    ranges.push((start, end));
 }
 
 /// Title memory the runtime mapped, unmapped or is about to write since a
 /// texture pass last took the ranges ([`remapped`]).
-static REMAPPED: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// Bounded at 2^15 ranges: at capacity the two nearest are merged, so a
+/// pass still sees every byte written since the last one (the queue used
+/// to be emptied, losing every range in it).
+type Ranges = kelvaroq_render::dirty_ranges::DirtyRanges<{ 1 << 15 }>;
+static REMAPPED: Mutex<Ranges> = Mutex::new(Ranges::new());
 
 /// The lowest start and the highest end of any span of [`Spans`] so far
 /// (the start is `u64::MAX` until there is one): what the runtime does to
@@ -603,7 +597,7 @@ static SPANNED: [std::sync::atomic::AtomicU64; 2] = [
 
 /// Since the start: slots whose view a newer view of other memory there
 /// made stale; ranges of memory noted as mapped, unmapped or written;
-/// ranges dropped because no pass took them; slots made due by such
+/// ranges widened at capacity; slots made due by such
 /// ranges; and made slots whose memory was found unmapped (made null).
 pub(crate) static STALE: [std::sync::atomic::AtomicU64; 5] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 5];
@@ -630,28 +624,15 @@ fn stale_rule() -> Rule {
 /// locks held: this locks one mutex of its own and calls nothing.
 pub(crate) fn remapped(at: usize, len: usize) {
     use std::sync::atomic::Ordering::Relaxed;
-    /// Ranges kept until a pass takes them.
-    const MOST: usize = 1 << 15;
     let (start, end) = (at as u64, at.saturating_add(len) as u64);
     if end <= SPANNED[0].load(Relaxed) || start >= SPANNED[1].load(Relaxed) {
         return;
     }
     let mut ranges = REMAPPED.lock().unwrap_or_else(|e| e.into_inner());
     STALE[1].fetch_add(1, Relaxed);
-    // Pages are mapped one after the other.
-    if let Some(last) = ranges.last_mut()
-        && last.1 == start
-    {
-        last.1 = end;
-        return;
+    if ranges.insert(start, end) {
+        STALE[2].fetch_add(1, Relaxed);
     }
-    if ranges.len() >= MOST {
-        // No pass runs (no shader that picks textures by index is bound):
-        // the slots there are looked at when they are due, as before.
-        STALE[2].fetch_add(ranges.len() as u64, Relaxed);
-        ranges.clear();
-    }
-    ranges.push((start, end));
 }
 
 /// Frames for which a slot a draw read through a table counts as a table's
@@ -1495,13 +1476,13 @@ impl HostHeap {
     pub(crate) fn texture_slots_remapped(&self, frame: u64) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
         self.texture_slots_page_written(frame);
-        let ranges = std::mem::take(&mut *REMAPPED.lock().unwrap_or_else(|e| e.into_inner()));
-        if ranges.is_empty() {
+        let ranges = std::mem::take(&mut *REMAPPED.lock().unwrap_or_else(|e| e.into_inner())).into_ranges();
+        if ranges.len() == 0 {
             return 0;
         }
         let mut slots: Vec<u32> = {
             let placed = self.placed.lock().unwrap_or_else(|e| e.into_inner());
-            ranges.iter().flat_map(|&(start, end)| placed.slots_in(start, end)).collect()
+            ranges.flat_map(|(start, end)| placed.slots_in(start, end)).collect()
         };
         slots.sort_unstable();
         slots.dedup();
@@ -1527,7 +1508,8 @@ impl HostHeap {
     /// are left to their draws. Counted either way; returns how many slots
     /// it made due.
     fn texture_slots_page_written(&self, frame: u64) -> usize {
-        let ranges = std::mem::take(&mut *PAGE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner()));
+        let ranges: Vec<_> =
+            std::mem::take(&mut *PAGE_WRITTEN.lock().unwrap_or_else(|e| e.into_inner())).into_ranges().collect();
         if ranges.is_empty() {
             return 0;
         }
