@@ -4815,7 +4815,7 @@ fn late_line(frames: f64) {
     fill_check::line();
     fill_ahead::line(frames);
     {
-        static SEEN: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        static SEEN: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
         let [direct, filled] = [0, 1].map(|i| {
             let now = crate::draw::CONSTANT_VIEWS[i].load(Ordering::Relaxed);
             now - SEEN[i].swap(now, Ordering::Relaxed)
