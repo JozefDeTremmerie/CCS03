@@ -597,3 +597,6 @@ fn a_group_prefix_reads_each_console_waves_sum_in_both_halves() {
     }
     eprintln!("ran on the hardware device: every thread has the sum of the console waves before its own");
 }
+
+#[path = "paired_tests.rs"]
+mod paired;

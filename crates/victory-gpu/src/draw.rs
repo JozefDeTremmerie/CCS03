@@ -118,7 +118,7 @@ fn early_budgets() -> (u64, u64) {
 /// `PS_BakeDecorations_*`), by the first 16 hex digits of their hash as the
 /// frame listings print it. They draw into a 256x256 corner of 2048x2048
 /// targets and name no texture in a table.
-const BAKE_PIXEL_SHADERS: [&str; 4] =
+pub(crate) const BAKE_PIXEL_SHADERS: [&str; 4] =
     ["c0a7fe77b1862e10", "0d1575a396dfe513", "b7cfd8dda91ebb6b", "280967ad158cee0b"];
 
 /// Where a pixel shader of the title's skin bake finds what it samples
@@ -1072,6 +1072,61 @@ static DISPATCHED: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn dispatched() -> u64 {
     DISPATCHED.load(Ordering::Relaxed)
+}
+
+/// Constant views of descriptor tables: bound straight on the title
+/// memory's host copy, and those copied into upload memory at submission
+/// (a fill), since the start.
+pub(crate) static CONSTANT_VIEWS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Whether a table's constant view is bound on the host copy of the title
+/// memory it names (`VICTORY_DIRECT_CONSTANTS=0`: copied into upload memory
+/// at submission, as before).
+///
+/// A fill read the constants from title memory on the CPU when the list was
+/// submitted. In the world the title's compute passes write constants that
+/// later draws read (`fill_ahead` found a fill that read bytes a flight
+/// then changed in every run that reached the prologue), so from then on
+/// every fill under a flight waited for the card to run all it had: in the
+/// prologue on the RTX 5080 all of the submitting thread's waits were
+/// those, 170-590 ms a frame. A fill also read, before the list ran, bytes
+/// a dispatch of the same submission was about to write.
+///
+/// Bound on the copy, the view reads what the copy holds when the draw
+/// runs: the title's bytes (the range is refreshed before the list runs, as
+/// a root constant view's is) and what shaders queued before it wrote, in
+/// the queue's order, with nothing to wait for. A view whose address in the
+/// copy is not on 256 bytes (the console asks 16), or whose rounded size
+/// runs past the copy's end, is filled as before.
+fn direct_constants() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_DIRECT_CONSTANTS").is_none_or(|v| v != "0"))
+}
+
+/// The host GPU address a table's constant view of `size` bytes at title
+/// address `address` reads on the title memory's host copy, with the range
+/// refreshed before the list runs; `None`: it is filled ([`direct_constants`]).
+fn direct_constant(list: &HostList, address: u64, size: u32) -> Option<u64> {
+    let counted = |direct: bool| {
+        CONSTANT_VIEWS[usize::from(!direct)].fetch_add(1, Ordering::Relaxed);
+    };
+    if !direct_constants() || size == 0 || size > 1 << 16 {
+        counted(false);
+        return None;
+    }
+    let Some(shadow) = crate::shadow::find(address, u64::from(size)) else {
+        counted(false);
+        return None;
+    };
+    let gpu = shadow.gpu(address);
+    let rounded = u64::from(size.next_multiple_of(256));
+    if !gpu.is_multiple_of(256) || shadow.left(address) < rounded {
+        counted(false);
+        return None;
+    }
+    shadow.refresh(list, address, rounded);
+    counted(true);
+    Some(gpu)
 }
 
 /// The host address of a root view: its buffer's host copy, or for a
@@ -2920,14 +2975,27 @@ impl State {
             user_data: 0,
             slot: 0,
         };
-        // Also within a time per pass: the pass runs on a thread that
+        // Also within a time per frame: the pass runs on a thread that
         // records the frame, and making and staging 192 MB of textures took
         // 1.6-2.2 s of each of the world's first twenty frames (run 20).
         // The rest waits for the next frames, as it does past the bytes.
-        static SPAN_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-        let span = std::time::Duration::from_millis(*SPAN_MS.get_or_init(|| {
-            std::env::var("VICTORY_TEXTURE_STAGE_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(250)
-        }));
+        // It was 250 ms a pass (750 while a backlog drains), and with
+        // thousands of slots due the pass took all of it in every frame of
+        // the world (81 passes of 81 at 250 ms on the RTX 5080): a frame
+        // could not be shorter. A game streams its textures in a slice of
+        // each frame; `VICTORY_TEXTURE_STAGE_MS` (6) is that slice, three
+        // times as long while a backlog drains. Its unit is microseconds
+        // with `VICTORY_TEXTURE_STAGE_US`.
+        // VICTORY_TEXTURE_STAGE_PER_FRAME=0 restores the fork's per-pass
+        // budget and its 250 ms default. Early passes keep their own budgets.
+        static LIMIT: std::sync::OnceLock<(bool, std::time::Duration)> = std::sync::OnceLock::new();
+        let (shared, span) = *LIMIT.get_or_init(|| {
+            let shared = std::env::var_os("VICTORY_TEXTURE_STAGE_PER_FRAME").is_none_or(|v| v != "0");
+            let var = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<u64>().ok());
+            let span = var("VICTORY_TEXTURE_STAGE_US").map(std::time::Duration::from_micros)
+                .unwrap_or_else(|| std::time::Duration::from_millis(var("VICTORY_TEXTURE_STAGE_MS").unwrap_or(if shared { 6 } else { 250 })));
+            (shared, span)
+        });
         // A backlog (a scene's first minutes: 22,000 slots due, 2-3 minutes of black
         // surfaces at 192 MB a frame) gets three times the bytes and the time until it
         // drains; `VICTORY_TEXTURE_CATCHUP=0` keeps the plain budget.
@@ -2937,9 +3005,27 @@ impl State {
         // A run made early (`State::early_textures`) has a budget of its
         // own: its bytes on top of what the frame has spent so far.
         // (Not `most`: that is the longest wait between looks, used below.)
+        // Recording threads share the ordinary slice. A competing pass
+        // leaves its slots due. No wait on another recording thread.
+        static USED: std::sync::Mutex<(u64, std::time::Duration)> =
+            std::sync::Mutex::new((0, std::time::Duration::ZERO));
+        let mut used = None;
         let (span, bytes_at_most) = match PASS_BUDGET.get() {
             Some((ms, bytes)) => {
                 (std::time::Duration::from_millis(ms), SPENT.load(Ordering::Relaxed).saturating_add(bytes))
+            }
+            None if shared => {
+                let mut budget = match USED.try_lock() {
+                    Ok(guard) => guard,
+                    Err(std::sync::TryLockError::WouldBlock) => return,
+                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                };
+                if budget.0 > frame { return; }
+                if budget.0 != frame { *budget = (frame, std::time::Duration::ZERO); }
+                let remaining = span.saturating_sub(budget.1);
+                if remaining.is_zero() { return; }
+                used = Some(budget);
+                (remaining, per_frame)
             }
             None => (span, per_frame),
         };
@@ -3239,6 +3325,9 @@ impl State {
                 }
                 None => host.texture_slot_done(index, write, again),
             }
+        }
+        if let Some(mut budget) = used {
+            budget.1 += began.elapsed();
         }
     }
 
@@ -4205,6 +4294,12 @@ impl State {
                 let used = entries.iter().find(|u| u.table_offset_dwords / 8 == k);
                 match crate::descriptor::view(table + u64::from(k) * 32) {
                     Some(View::Constant(address, size)) => {
+                        // On the GPU's copy of the title memory, read when
+                        // the draw runs, in the queue's order.
+                        if let Some(gpu) = direct_constant(list, address, size) {
+                            host.constant_at(index, gpu, size);
+                            continue;
+                        }
                         let Some((gpu, to)) = list.scratch(u64::from(size)) else {
                             host.make_null(index);
                             continue;

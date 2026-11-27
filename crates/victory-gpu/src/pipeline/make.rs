@@ -12,8 +12,14 @@
 //! bake) are there at once as before; past the budget a draw or dispatch
 //! whose pipeline is not ready is dropped, as an untranslated one is.
 //!
-//! The default budget is half a second per title frame. A pass the title
-//! runs only once and whose pipeline takes longer is lost.
+//! The default budget is 4 ms per title frame (it was half a second): a
+//! frame of the world met pipelines still being made in most frames while
+//! the driver compiled in the background, and the title begins two or
+//! three frames per frame it presents, so frames of 1.5 to 3 s came one
+//! after the other in the prologue on the RTX 5080. A draw whose pipeline
+//! is not ready is dropped until it is, as a game streams in what it has
+//! not compiled yet. The decoration bake's pipelines, a pass the title runs
+//! once, still get half a second (`VICTORY_PIPELINE_WAIT_ONCE_MS`).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -141,17 +147,39 @@ pub(crate) fn missing(p: &Pending) -> Option<String> {
 /// Signalled whenever a worker has made a pipeline.
 static DONE: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 
-/// Waiting allowed per title frame, over all threads.
+/// Waiting allowed per title frame, over all threads
+/// (`VICTORY_PIPELINE_WAIT_MS`, 4).
 fn wait_budget() -> Duration {
     static BUDGET: OnceLock<Duration> = OnceLock::new();
     *BUDGET.get_or_init(|| {
         let millis = std::env::var("VICTORY_PIPELINE_WAIT_MS")
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(500);
+            .unwrap_or(4);
         tracing::info!(millis, "host pipeline wait budget per frame");
         Duration::from_millis(millis)
     })
+}
+
+/// Waiting allowed per title frame for the pipelines of a pass the title
+/// runs once (the decoration bake, `crate::draw::BAKE_PIXEL_SHADERS`):
+/// `VICTORY_PIPELINE_WAIT_ONCE_MS`, 500.
+fn once_budget() -> Duration {
+    static BUDGET: OnceLock<Duration> = OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let millis = std::env::var("VICTORY_PIPELINE_WAIT_ONCE_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(500);
+        Duration::from_millis(millis)
+    })
+}
+
+impl Pending {
+    /// Whether this is a pipeline of a pass the title runs once.
+    fn runs_once(&self) -> bool {
+        self.shaders.iter().any(|s| crate::draw::BAKE_PIXEL_SHADERS.contains(&s.hash.as_str()))
+    }
 }
 
 /// Pipelines queued and not made yet.
@@ -277,7 +305,7 @@ fn shared_budget() -> bool {
 
 /// Waits for `p` while frame `frame` has budget left.
 fn wait(p: &Pending, frame: u64) {
-    let budget = wait_budget();
+    let budget = if p.runs_once() { once_budget().max(wait_budget()) } else { wait_budget() };
     if budget.is_zero() {
         return;
     }
